@@ -1,8 +1,15 @@
 import sys
 import vlc
+import os
+import numpy as np
+import threading
+import time
 
 APPTYPE=1
 FILE = r"C:\Users\h01928\Documents\GIT_codes\MyMediaPlayer\media\video2.mp4"
+current_running_speed = -1
+
+# https://github.com/oaubert/python-vlc
 
 if APPTYPE==0: # simple test application
 
@@ -41,12 +48,6 @@ if APPTYPE==0: # simple test application
             vbox.addLayout(hbox)
 
             self.setLayout(vbox)
-
-            # button = QPushButton('PyQt5 button', self)
-            # button.setToolTip('This is an example button')
-            # button.move(10,170)
-            # button.clicked.connect(self.on_click)
-
             self.show()
 
         @pyqtSlot()
@@ -88,8 +89,6 @@ else: # the actual application
                     self.videoPlayer.set_xwindow(self.videoFrame.winId())
                 elif sys.platform == "win32":  # for Windows
                     self.videoPlayer.set_hwnd(self.videoFrame.winId())
-                elif sys.platform == "darwin":  # for MacOS
-                    self.videoPlayer.set_nsobject(int(self.videoFrame.winId()))
 
             self.hbuttonbox = QHBoxLayout()
             self.hbuttonbox.addStretch(1)
@@ -97,7 +96,6 @@ else: # the actual application
             self.vbuttonbox.addStretch(1)
 
             self.playbutton = QPushButton("Play",self)
-            x = self.rect().getCoords()
             self.hbuttonbox.addWidget(self.playbutton)
             self.playbutton.clicked.connect(self.play_pause)
 
@@ -105,16 +103,53 @@ else: # the actual application
             self.hbuttonbox.addWidget(self.stopbutton)
             self.stopbutton.clicked.connect(self.stop)
 
+            self.positionslider = QSlider(Qt.Horizontal, self)
+            self.positionslider.setToolTip("Position")
+            self.positionslider.setMaximum(1000)
+            self.positionslider.setMinimumWidth(500)
+            self.positionslider.setTickInterval(1)
+            self.positionslider.sliderMoved.connect(self.set_position)
+            self.positionslider.sliderPressed.connect(self.set_position)
+
+            self.timer = QTimer(self)
+            self.timer.setInterval(200)
+            self.timer.timeout.connect(self.update_ui)
+
+            self.timetxt = QLabel('0', self)
+            self.timetxt.setFont(QFont('Times',12))
+            self.timetxt.setAlignment(Qt.AlignCenter)
+            self.hbuttonbox.addWidget(self.timetxt)
+
+            self.speedtxt = QLabel('0', self)
+            self.speedtxt.setFont(QFont('Times',14))
+            self.speedtxt.setAlignment(Qt.AlignCenter)
+            self.hbuttonbox.addWidget(self.speedtxt)
+
             self.vbuttonbox.addLayout(self.hbuttonbox)
             self.setLayout(self.vbuttonbox)
 
-            # media object
+            menu_bar = self.menuBar()
+            # File menu
+            file_menu = menu_bar.addMenu("File")
+            # Add actions to file menu
+            open_action = QAction("Open video", self)
+            #close_action = QAction("Close App", self)
+            file_menu.addAction(open_action)
+            #file_menu.addAction(close_action)
+            open_action.triggered.connect(self.open_file)
+            #close_action.triggered.connect(sys.exit)
 
+            # media object
             media = vlc.Media(FILE)
             # setting media to the media player
             self.videoPlayer.set_media(media)
             #self.videoPlayer.play()
             self.mainFrame.setLayout(t_lay_parent)
+
+            self.default_speed = 10.0  # km/h
+            self.is_paused = True
+            self.update_speed()
+            self.playrate = 1.0
 
             self.show()
 
@@ -122,7 +157,74 @@ else: # the actual application
             x = self.rect().getCoords()
             self.playbutton.move(10, x[3] - 35)
             self.stopbutton.move(120, x[3] - 35)
+            self.positionslider.move(250, x[3] - 35)
+            self.timetxt.move(x[2]-250, x[3] - 35)
+            self.timetxt.setFixedWidth(150)
+            self.speedtxt.move(x[2] - 110, x[3] - 35)
+            self.positionslider.setFixedWidth(x[2]-500)
+
             QMainWindow.resizeEvent(self, event)
+
+        def set_position(self):
+            """Set the movie position according to the position slider.
+            """
+
+            # The vlc MediaPlayer needs a float value between 0 and 1, Qt uses
+            # integer variables, so you need a factor; the higher the factor, the
+            # more precise are the results (1000 should suffice).
+
+            # Set the media position to where the slider was dragged
+            self.timer.stop()
+            pos = self.positionslider.value()
+            self.videoPlayer.set_position(pos / 1000.0)
+            self.timer.start()
+
+        def update_speed(self):
+            self.speedtxt.setText(str('%1.2f' % current_running_speed))
+            running_speed = min(current_running_speed,25) # capped
+            if running_speed<0:
+                self.speedtxt.setStyleSheet("color: red;  background-color: black")
+            else:
+                self.speedtxt.setStyleSheet("color: black;  background-color: white")
+                self.playrate = max(0.001,running_speed/self.default_speed)
+
+        def update_ui(self):
+            """Updates the user interface"""
+
+            # Set the slider's position to its corresponding media position
+            # Note that the setValue function only takes values of type int,
+            # so we must first convert the corresponding media position.
+            media_pos = int(self.videoPlayer.get_position() * 1000)
+            self.positionslider.setValue(media_pos)
+
+            fps = -1
+            try:
+                fps = self.videoPlayer.get_fps()
+            except:
+                pass
+
+            self.timetxt.setText(self.ms_to_timestr(max(0,self.videoPlayer.get_time())) + " (%1.0f)" % fps )
+            self.update_speed()
+            self.videoPlayer.set_rate(self.playrate)
+            print("rate is %1.3f" % self.videoPlayer.get_rate())
+
+            # No need to call this function if nothing is played
+            if not self.videoPlayer.is_playing():
+                self.timer.stop()
+
+                # After the video finished, the play button stills shows "Pause",
+                # which is not the desired behavior of a media player.
+                # This fixes that "bug".
+                if not self.is_paused:
+                    self.stop()
+
+        def ms_to_timestr(self,ms):
+            sec = ms/1000.0
+            hours = int(np.floor(sec/60/60))
+            sec = sec - hours*60*60
+            minutes = int(np.floor(sec/60))
+            sec = sec - minutes*60
+            return "%02i:%02i:%02.2f" % (hours,minutes,sec)
 
         def play_pause(self):
             """Toggle play/pause status
@@ -131,7 +233,7 @@ else: # the actual application
                 self.videoPlayer.pause()
                 self.playbutton.setText("Play")
                 self.is_paused = True
-                #self.timer.stop()
+                self.timer.stop()
             else:
                 if self.videoPlayer.play() == -1:
                     self.open_file()
@@ -139,7 +241,7 @@ else: # the actual application
 
                 self.videoPlayer.play()
                 self.playbutton.setText("Pause")
-                #self.timer.start()
+                self.timer.start()
                 self.is_paused = False
 
         def stop(self):
@@ -147,6 +249,32 @@ else: # the actual application
             """
             self.videoPlayer.stop()
             self.playbutton.setText("Play")
+
+        def open_file(self):
+            """Open a media file in a MediaPlayer
+            """
+            dialog_txt = "Choose Media File"
+            filename = QFileDialog.getOpenFileName(self, dialog_txt, os.path.expanduser('~'))
+            if not filename:
+                print("File was null")
+                return
+
+            # getOpenFileName returns a tuple, so use only the actual file name
+            self.media = vlc.Media(filename[0])
+
+            # Put the media in the media player
+            self.videoPlayer.set_media(self.media)
+
+            # Parse the metadata of the file
+            self.media.parse()
+
+            # Set the title of the track as window title
+            self.setWindowTitle(self.media.get_meta(0))
+
+            self.videoPlayer.audio_set_volume(0)
+            self.playrate = 1.0
+
+            self.play_pause()
 
         def mouseDoubleClickEvent(self, event):
             if event.button() == Qt.LeftButton:
@@ -158,59 +286,48 @@ else: # the actual application
                     #self.videoFrame1.show()
                     self.setWindowState(Qt.WindowNoState)
 
+# simulate treadmill speed input
+def speed_function():
+    global current_running_speed
+
+    time.sleep(10)
+    print("started speed tracking function!")
+    running_speed = 0
+    current_running_speed = running_speed
+    t = 0
+    step = 0.5
+    default_running_speed = 10.0 # as km/h
+    while True:
+
+        running_speed = default_running_speed*(1+np.sin(t/30.0))
+        running_speed += 0.05*(np.random.rand()*2 - 1.0)
+        running_speed = np.maximum(0,running_speed)
+        rate = running_speed/default_running_speed
+        #print("time %f: Changed running speed to %f with rate %f" % (t, running_speed,rate))
+
+        current_running_speed = running_speed
+        time.sleep(step)
+        t+=step
+        if t>5000:
+            current_running_speed = 0
+            break
+
+    print("tracking stopped!")
+
 if __name__ == "__main__":
+
+    # external thread that updates current_running_speed
+    speed_thread = threading.Thread(target=speed_function, args=())
+    speed_thread.start()
 
     if APPTYPE==0:
         app = QApplication(sys.argv)
         ex = App()
         sys.exit(app.exec_())
-
     else:
-
         app = QApplication(sys.argv)
         app.setApplicationName("Treadmill Player")
         window = MainWindow()
         app.exec_()
 
-    # else:
-    #     # importing vlc module
-    #     import vlc
-    #     import numpy as np
-    #     # importing time module
-    #     import time
-    #
-    #     # creating vlc media player object
-    #     media_player = vlc.MediaPlayer()
-    #
-    #     # media object
-    #     FILE = r"C:\Users\h01928\Documents\GIT_codes\MyMediaPlayer\media\video2.mp4"
-    #     media = vlc.Media(FILE)
-    #
-    #     # setting media to the media player
-    #     media_player.set_media(media)
-    #
-    #     # start playing video
-    #     media_player.play()
-    #
-    #     #media_player.toggle_fullscreen()
-    #     # wait so the video can be played for 5 seconds
-    #     # irrespective for length of video
-    #     t = 0
-    #     step = 1.0
-    #     running_speed = 8.0 # as km/h
-    #     conversion_rate = 1.0/8.0
-    #     while True:
-    #         running_speed = 10.0 + 8*np.sin(t/5.0)
-    #         running_speed += 0.25*(np.random.rand()*2 - 1.0)
-    #         running_speed = np.maximum(0,running_speed)
-    #
-    #         rate = running_speed*conversion_rate
-    #         media_player.set_rate(rate)
-    #
-    #         print("time %f with running speed %f and rate %f" % (t, running_speed,rate))
-    #
-    #         time.sleep(step)
-    #         t+=step
-    #         if t>60:
-    #             break
 
