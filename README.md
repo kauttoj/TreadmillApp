@@ -1,10 +1,12 @@
-# MyMediaPlayer
+# TreadmillApp
 
 This repo contains codes for a Python-based video player with dynamic video playrate. Playrate is obtained from an external source, which in my case is a treadmill. The speed of the treadmill is obtained using a webcam and a bunch of machine vision and machine learning algorithms. I have trained a Keras-based neural network model to classify digits of my treadmill.
 
 Main GUI window:
 ![TreadmillApp](https://user-images.githubusercontent.com/17804946/125808951-2df3f8c5-969e-4f34-a2e7-32d81a7e7510.png)
 
+Video GUI window:
+![TreadmillApp1](https://user-images.githubusercontent.com/17804946/125809859-65d4e50f-2015-4772-9aa5-91346724c51f.png)
 
 Requirements:
 
