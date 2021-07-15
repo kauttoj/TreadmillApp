@@ -5,7 +5,7 @@ This repo contains codes for a Python-based video player with dynamic video play
 Main GUI window:
 ![TreadmillApp](https://user-images.githubusercontent.com/17804946/125808951-2df3f8c5-969e-4f34-a2e7-32d81a7e7510.png)
 
-Video GUI window:
+Video window for an example video (not included):
 ![TreadmillApp1](https://user-images.githubusercontent.com/17804946/125809859-65d4e50f-2015-4772-9aa5-91346724c51f.png)
 
 Requirements:
