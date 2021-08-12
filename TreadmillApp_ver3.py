@@ -4,6 +4,7 @@ import os
 import numpy as np
 import threading
 import time
+
 import sys
 import configparser
 
@@ -23,15 +24,28 @@ config_data.read(CONFIG_FILE)
 os.add_dll_directory(config_data.get("paths","vlc_path"))
 import vlc
 
-os.environ["CUDA_VISIBLE_DEVICES"]="-1"
-from keras.models import load_model
+os.environ["CUDA_VISIBLE_DEVICES"]="-1"  # use CPU
+from tensorflow.keras.models import load_model
 
+def set_value(entry,default):
+    global config_data
+    try:
+        val = float(config_data.get("main",entry))
+    except:
+        val = default
+    config_data["main"][entry] = str(val)
+    return val
+
+# required, no defaults
 DIGIT_MODEL = config_data.get("paths","model_path") # path to saved Keras model
-PREDICT_INTERVAL = float(config_data.get("main","predict_interval")) # in ms
 DEFAULT_PATH = config_data.get("paths","video_path") # path to running videos (MP4)
-SMOOTH_WINDOW = float(config_data.get("main","smooth_window")) # path to running videos (MP4)
-DEFAULT_SPEED = float(config_data.get("main","default_speed"))
-MAX_SPEED = float(config_data.get("main","max_speed"))
+
+# params with defaults
+PREDICT_INTERVAL = float(set_value("predict_interval",250.0))
+SMOOTH_WINDOW = float(set_value("smooth_window",2.0))
+DEFAULT_SPEED = float(set_value("default_speed",6.0))
+MAX_SPEED = float(set_value("max_speed",20))
+EXTRA_PIXEL_RATIO = float(set_value("extra_pixel_ratio",0.08))
 
 current_running_speed = -1 # global variable
 running_speed_history = [] # keep track of previous speeds
@@ -39,16 +53,23 @@ running_speed_history = [] # keep track of previous speeds
 # FOR DEBUGGING AND DEVELOPMENT
 import pickle
 import matplotlib.pyplot as plt
-WEBCAM_VIDEO ='' #r'D:\\JanneK\\Documents\\git_repos\\MyMediaPlayer-main\\mydata\\WIN_20210713_20_33_27_Pro.mp4'#  WIN_20210719_192555.MP4'
+WEBCAM_VIDEO =r'' #C:\Code\MyMediaPlayer-main\mydata\\WIN_20210806_175650.MP4'#  WIN_20210719_192555.MP4'
 LOAD_MODEL = True # set false for faster loading in debugging
 
 # correlation image registering
 def register_image(image,offset_image):
+    MAX_CORRECTION = int(0.10*min(image.shape[0],image.shape[1]))
+
     # pixel precision first
     shift, error, diffphase = phase_cross_correlation(image, np.fft.fft2(cv2.cvtColor(offset_image,cv2.COLOR_BGR2GRAY)),space='fourier')
     # subpixel precision
     # shift, error, diffphase = phase_cross_correlation(image, offset_image,
     #print(f"Detected subpixel offset (y, x): {shift}")
+    if abs(shift[0])>MAX_CORRECTION:
+        shift[0] = 0
+    if abs(shift[1])>MAX_CORRECTION:
+        shift[1] = 0
+
     offset_image = np.roll(offset_image,int(shift[0]),axis=0)
     offset_image = np.roll(offset_image,int(shift[1]),axis=1)
     #if abs(shift[0])+abs(shift[1])>0:
@@ -159,7 +180,14 @@ class VideoWindow(QMainWindow):
         self.update_speed()
         self.videoPlayer.play()
 
+        self.videoFrame.setMouseTracking(True)
+        self.videoFrame.mouseMoveEvent = self.mousemove
+        self.last_mouse_move = time.time()
+
         self.show()
+
+    def mousemove(self,e):
+        self.last_mouse_move = time.time()
 
     def closeEvent(self, event):
         self.videoPlayer.stop()
@@ -206,6 +234,12 @@ class VideoWindow(QMainWindow):
         # Note that the setValue function only takes values of type int,
         # so we must first convert the corresponding media position.
         #print('executed update_ui')
+        now = time.time()
+        if (now - self.last_mouse_move) > 4:
+            self.videoFrame.setCursor(QtGui.QCursor(QtCore.Qt.BlankCursor))
+        else:
+            self.videoFrame.setCursor(QtGui.QCursor(QtCore.Qt.ArrowCursor))
+
         pos = self.videoPlayer.get_position()
         media_pos = int(pos * 1000)
         self.positionslider.setValue(media_pos)
@@ -407,6 +441,10 @@ class MainWindow(QDialog):
         self.medianbox.setTristate(False)
         self.medianbox.setChecked(False)
         self.medianbox.setObjectName("medianbox")
+        if int(config_data.get("main", "median_box"))==1:
+            self.medianbox.setChecked(True)
+        else:
+            self.medianbox.setChecked(False)
 
         self.tracking = QtWidgets.QCheckBox(myGUI)
         self.tracking.setGeometry(QtCore.QRect(780,25, 81, 17))
@@ -418,11 +456,16 @@ class MainWindow(QDialog):
         self.boxdetect = QtWidgets.QCheckBox(myGUI)
         self.boxdetect.setGeometry(QtCore.QRect(780, 420, 81, 17))
         self.boxdetect.setTristate(False)
-        self.boxdetect.setChecked(True)
         self.boxdetect.setObjectName("boxdetect")
+        if int(config_data.get("main", "box_detect"))==1:
+            self.boxdetect.setChecked(True)
+        else:
+            self.boxdetect.setChecked(False)
+
         self.graphicsView = QtWidgets.QLabel(myGUI)
         self.graphicsView.setGeometry(QtCore.QRect(350, 90, 411, 331))
         self.graphicsView.setObjectName("graphicsView")
+
         self.videopathEdit = QtWidgets.QTextEdit(myGUI)
         self.videopathEdit.setGeometry(QtCore.QRect(90, 10, 421, 31))
         self.videopathEdit.setObjectName("textEdit")
@@ -447,7 +490,10 @@ class MainWindow(QDialog):
         self.source_group.addButton(self.source0,0)
         self.source_group.addButton(self.source1,1)
         self.source_group.buttonClicked.connect(self.source_event)
-        self.source0.setChecked(1)
+        if int(config_data.get("main", "source"))==0:
+            self.source0.setChecked(True)
+        else:
+            self.source1.setChecked(True)
 
         self.label_4 = QtWidgets.QLabel(myGUI)
         self.label_4.setGeometry(QtCore.QRect(20, 10, 71, 16))
@@ -584,12 +630,18 @@ class MainWindow(QDialog):
     # function to capture and analyze webcam stream (running as separate thread)
     def camera_update(self,device):
         global running_speed_history,current_running_speed
-        INITIAL_RUNS = 5 # initial frames to set-up template frame
+        INITIAL_FRAMES = 5 # initial frames to set-up template frame
 
+        DEBUGGING_MODE = False
         if len(WEBCAM_VIDEO)>0:
             assert os.path.exists(WEBCAM_VIDEO),"Webcam video not found!"
             print("!! Loading webcam video instead of actual stream (DEBUGGING)!!")
             self.capture = cv2.VideoCapture(WEBCAM_VIDEO)
+            DEBUGGING_MODE = True
+            old_images= [None,None,None]
+            image_num = 0
+            debug_fig,debug_ax = plt.subplots(1, 3, figsize=[3 * 3,3])
+            speed_estimation_file = open("speed_predictions_debug.csv","w")
         else:
             self.capture = cv2.VideoCapture(device,cv2.CAP_DSHOW)
         old_device = device
@@ -626,8 +678,8 @@ class MainWindow(QDialog):
 
             return x1, y1, x2, y2
 
+        frame_num = 0
         while True:
-
             if self.capture.isOpened():
                 if self.source_group.checkedId() != old_device or not(self.tracking.isChecked()):
                     self.capture.release()
@@ -641,15 +693,17 @@ class MainWindow(QDialog):
                 #else:
                 (status, frame) = self.capture.read()
 
-                if init_run<INITIAL_RUNS:
+                frame_num+=1
+
+                if init_run<INITIAL_FRAMES:
 
                     image = QtGui.QImage(frame.data, frame.shape[1], frame.shape[0], QtGui.QImage.Format_RGB888).rgbSwapped()
                     pixmap = QtGui.QPixmap.fromImage(image)
                     pixmap = pixmap.scaled(self.graphicsView.width(), self.graphicsView.height(), QtCore.Qt.KeepAspectRatio)
 
                     init_run+=1
-                    template_frame += frame/INITIAL_RUNS
-                    if init_run==INITIAL_RUNS:
+                    template_frame += frame/INITIAL_FRAMES
+                    if init_run==INITIAL_FRAMES:
                         template_frame_real = template_frame.astype(np.uint8)
                         template_frame = np.fft.fft2(cv2.cvtColor(template_frame.astype(np.uint8),cv2.COLOR_BGR2GRAY))
 
@@ -693,27 +747,39 @@ class MainWindow(QDialog):
                                 self.coordinate1 = None
                                 self.coordinate2 = None
                                 continue
-
                             print("ROI coordinates: x1=%i, y1=%i, x2=%i, y2=%i" % (x1,y1,x2,y2))
-
                             old_ROI=ROI
                         else:
                             ROI = old_ROI
 
                         # if enough time passed, analyze digits
                         if (now - last_prediction_time)*1000 > PREDICT_INTERVAL:
-                            predicted_digits,rectangles = predict_digit(frame, ROI,self.medianbox.isChecked(),self.boxdetect.isChecked())
+                            predicted_digits,predicted_prob,rectangles,raw_frames = predict_digit(frame, ROI,self.medianbox.isChecked(),self.boxdetect.isChecked())
                             if predicted_digits is None:
                                 # failed, just use last valid prediction
                                 predicted_speed = current_running_speed
+                                predicted_prob = 0
                             else:
                                 # convert individual digits to float using selected precision
-                                predicted_digits_str = "".join([str(x) if x>-1 else "0" for x in predicted_digits])
+                                if 0:#DEBUGGING_MODE:
+                                    for k in range(3):
+                                        if old_images[k] is not None:
+                                            old_images[k].set_data(raw_frames[k])
+                                        else:
+                                            old_images[k]=debug_ax[k].imshow(raw_frames[k])
+                                        if np.random.rand()<1/10 and predicted_digits[k]>-1:
+                                            image_num += 1
+                                            plt.imsave("%i.png" % (image_num), raw_frames[k])
+                                predicted_digits_str = "".join([str(x) if x > -1 else "0" for x in predicted_digits])
                                 predicted_digits_str = predicted_digits_str[0:(len(predicted_digits)-self.precision)] + "." + predicted_digits_str[-self.precision:]
                                 predicted_speed = float(predicted_digits_str)
 
                             timestamp = now - self.starttime
-                            running_speed_history.append((timestamp, predicted_speed))
+                            if DEBUGGING_MODE:
+                                speed_estimation_file.writelines("frame=%i, predicted_speed=%f, prob=%f\n" % (frame_num,predicted_speed,predicted_prob))
+                                speed_estimation_file.flush()
+
+                            running_speed_history.append((timestamp, predicted_speed,predicted_prob))
                             # a function to obtain speed, could include some fancy smoothing and error-checking
                             current_running_speed = speed_estimator(timestamp,running_speed_history)
 
@@ -725,13 +791,14 @@ class MainWindow(QDialog):
                             self.frames_per_sec.setText("%.2f frames/sec" % (1.0 / (max(0.0001,time.time()-now))))
                             last_prediction_time = now
 
-                        frame = cv2.rectangle(frame, (ROI[0],ROI[1]),(ROI[2],ROI[3]), (0, 255, 0),4)
+                        frame = cv2.rectangle(frame, (ROI[0],ROI[1]),(ROI[2],ROI[3]), (0, 255, 0),3)
                         if rectangles is not None:
-                            for rect in rectangles:
+                            for k,rect in enumerate(rectangles):
+                                col = (0, 200,200) if (k%2==0) else (200,0,200)
                                 frame = cv2.rectangle(frame,
                                                     (rect[0],rect[2]),
                                                     (rect[1],rect[3]),
-                                                    (0, 200,200),3)
+                                                    col,2)
 
                         self.regionselection.setText("ROI (%i,%i,%i,%i)" % (x1,y1,x2,y2))
 
@@ -854,101 +921,140 @@ class MainWindow(QDialog):
         if self.videowindow is not None:
             self.videowindow.close()
 
+def weighted_median(data, weights):
+    """
+    Args:
+      data (list or numpy.array): data
+      weights (list or numpy.array): weights
+    """
+    data, weights = np.array(data).squeeze(), np.array(weights).squeeze()
+    s_data, s_weights = map(np.array, zip(*sorted(zip(data, weights))))
+    midpoint = 0.5 * sum(s_weights)
+    if any(weights > midpoint):
+        w_median = (data[weights == np.max(weights)])[0]
+    else:
+        cs_weights = np.cumsum(s_weights)
+        idx = np.where(cs_weights <= midpoint)[0][-1]
+        if cs_weights[idx] == midpoint:
+            w_median = np.mean(s_data[idx:idx+2])
+        else:
+            w_median = s_data[idx+1]
+    return w_median
 # function to compute speed from current and historical measurements
 def speed_estimator(current_time,running_speed_history):
     prev_speeds = []
+    prev_probs = []
     for x in reversed(running_speed_history):
         if (current_time - x[0])<SMOOTH_WINDOW:
             prev_speeds.append(x[1])
+            prev_probs.append(x[2])
         else:
             break
-    display_speed = float(np.median(prev_speeds))
+    if len(prev_speeds)>5:
+        display_speed = weighted_median(prev_speeds,prev_probs)
+    else:
+        display_speed = prev_speeds[0]
     display_speed = max(0.001, min(MAX_SPEED,display_speed))
     return display_speed
 
 # given frame and ROI, return sub-images of digits
 def image_preprocessor(img,ROI,use_prev_box,use_detection,prev_boxes=None):
+
     if prev_boxes is None:
         prev_boxes=[]
     ROI_w = ROI[2] - ROI[0]
     ROI_h = ROI[3] - ROI[1]
-    img = img[ROI[1]:(ROI[3] + 1), ROI[0]:(ROI[2] + 1), :]
-    img = np.flip(img, axis=0)
-    img = np.flip(img, axis=1)
-    # print("image size = ",str(img.shape))
+
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    ROI_img = img[ROI[1]:(ROI[3] + 1), ROI[0]:(ROI[2] + 1), :]
+    gray = cv2.cvtColor(ROI_img, cv2.COLOR_BGR2GRAY)
     thresh_inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
     # find contours
-    extra_width = 0
+
     if use_detection:
         contours = cv2.findContours(thresh_inv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]  #
         boxes = [cv2.boundingRect(c) for c in contours]
-        boxes = [x for x in boxes if x[2] > img.shape[1] * 0.70 and x[3] > img.shape[0] * 0.70]
+        boxes = [x for x in boxes if x[2] > ROI_img.shape[1] * 0.70 and x[3] > ROI_img.shape[0] * 0.70]
         boxes = [x for x in sorted(boxes, key=lambda x: x[2] * x[3], reverse=True)]
-        extra_width = 1 # add pixels just in case
+
     add_to_hist = True
     if not(use_detection) or len(boxes) == 0:
         boxes = [[0,0,ROI_w,ROI_h]]
         add_to_hist=False
+
     box = boxes[0]
-    box = [max(0, box[0] - extra_width), box[1], min(ROI_w, box[2] + extra_width), box[3]]
-    if add_to_hist:
+    box = [max(0, box[0]), box[1], min(ROI_w, box[2]), box[3]] # x,y,w,h  ??
+
+    if use_detection and add_to_hist:
         prev_boxes.append(box)
         if len(prev_boxes)>50:
             prev_boxes=prev_boxes[-50:]
-    if use_prev_box:
+    if use_detection and use_prev_box:
         box = [int(np.median([x[k] for x in prev_boxes])) for k in range(4)]
-    # now "box" is a smaller, more accurate box inside the initial, bigger ROI
-    img = img[box[1]:(box[1] + box[3]), box[0]:(box[0] + box[2]), :]
-    dx = int(np.round((img.shape[1]-2*extra_width)/ ROI[-1]))
+
+    dx = int(np.round((box[2])/ROI[-1])) # width of one box
+    extra_pixels_x = int(np.ceil(dx*(EXTRA_PIXEL_RATIO)))
+    extra_pixels_y = 1# int(np.ceil(box[3]*(EXTRA_PIXEL_RATIO)))
+
     digits = []
     rectangles = []
     for part in range(ROI[-1]):
         rectangles.append([
-            ROI[0] + ROI_w - (box[0] + (dx * (part + 1))),
-            ROI[0]+ ROI_w - (box[0]+(dx * part)),
-            ROI[1]+ROI_h-box[3],
-            ROI[3]-box[1]])
-        sub_img = img[:,(extra_width+dx * part):(extra_width+dx*(part + 1)), :]
+            ROI[0] + ROI_w - (box[0] + (dx * (part + 1))) - extra_pixels_x,
+            ROI[0] + ROI_w - (box[0]+(dx * part)) + extra_pixels_x,
+            ROI[1] + ROI_h-box[3] - extra_pixels_y,
+            ROI[3] - box[1] + extra_pixels_y])
+        sub_img = img[
+                  (ROI[1]+box[1]-extra_pixels_y):(ROI[1]+box[1] + box[3]+extra_pixels_y+1),
+                  (ROI[0]+box[0]+dx * part - extra_pixels_x):(ROI[0]+dx*(part + 1)+extra_pixels_x+1),
+                  :]
+        sub_img = np.flip(sub_img , axis=0)
+        sub_img = np.flip(sub_img , axis=1)
         digits.append(sub_img)
+    digits = list(reversed(digits))
+    rectangles = list(reversed(rectangles))
+
     return digits,prev_boxes,rectangles
 
 # resize sub-image with optional padding
 def resize_image(img, size=(28,28),PAD = 0):
     # size = h,w
-    interpolation = cv2.INTER_AREA
+    interpolation = cv2.INTER_LINEAR
     size = size[0]-PAD,size[1]-PAD
-    #extra_pad = int(PAD / 2)
     h, w = img.shape[:2]
     aspect_ratio = h/w
     new_aspect_ratio = size[0]/size[1]
-    #c = img.shape[2] if len(img.shape)>2 else 1
-    if h == w:
+
+    median_color = [int(x) for x in (0.5*np.median(img, axis=(0, 1)))]
+
+    if abs(new_aspect_ratio - aspect_ratio)<1e-6:
         new_im = cv2.resize(img, size, interpolation)
         #new_im = cv2.copyMakeBorder(mask,extra_pad,extra_pad,extra_pad,extra_pad, cv2.BORDER_CONSTANT, value=[0,0,0])
         assert new_im.shape == IMG_SIZE
         return new_im
-    if new_aspect_ratio<aspect_ratio: # new image is wider, so need padding to width
+    elif new_aspect_ratio<aspect_ratio: # new image is wider, so need padding to width
         tmp_size = [size[0],int(np.round(size[0]/aspect_ratio))]
         new_im = cv2.resize(img,[tmp_size[1],tmp_size[0]],interpolation)
         P = size[1]-new_im.shape[1]
-        new_im = cv2.copyMakeBorder(new_im,0,0,int(P/2),0, cv2.BORDER_CONSTANT, value=[0, 0, 0])  # top, bottom, left, right
-        new_im = cv2.copyMakeBorder(new_im, 0, 0,0,size[1]-new_im.shape[1], cv2.BORDER_CONSTANT, value=[0, 0, 0])  # top, bottom, left, right
+        new_im = cv2.copyMakeBorder(new_im,0,0,int(P/2),0, cv2.BORDER_CONSTANT, value=median_color)  # top, bottom, left, right
+        new_im = cv2.copyMakeBorder(new_im, 0, 0,0,size[1]-new_im.shape[1], cv2.BORDER_CONSTANT, value=median_color)  # top, bottom, left, right
     else:
         tmp_size = [int(np.round(size[1]/aspect_ratio)),size[1]]
         new_im = cv2.resize(img,[tmp_size[1],tmp_size[0]],interpolation)
         P = size[0]-new_im.shape[0]
-        new_im = cv2.copyMakeBorder(new_im,int(P/2),0,0,0, cv2.BORDER_CONSTANT, value=[0, 0, 0])  # top, bottom, left, right
-        new_im = cv2.copyMakeBorder(new_im, 0,size[0]-new_im.shape[0],0,0, cv2.BORDER_CONSTANT, value=[0, 0, 0])  # top, bottom, left, righ
+        new_im = cv2.copyMakeBorder(new_im,int(P/2),0,0,0, cv2.BORDER_CONSTANT, value=median_color)  # top, bottom, left, right
+        new_im = cv2.copyMakeBorder(new_im, 0,size[0]-new_im.shape[0],0,0, cv2.BORDER_CONSTANT, value=median_color)  # top, bottom, left, righ
     #new_im = cv2.copyMakeBorder(new_im,extra_pad,extra_pad,extra_pad,extra_pad, cv2.BORDER_CONSTANT, value=[0, 0, 0])  # top, bottom, left, right
-    assert new_im.shape[:2] == IMG_SIZE,"resized image incorrect shape (%s)!" % str(new_im.shape)
+
+    assert new_im.shape[:2] == IMG_SIZE,"BUG: Resized image has incorrect shape (%s)!" % str(new_im.shape)
+
     return new_im
 
 # feed processed images to the predictor model
 prev_boxes = []
 predictor_model = None
-def predict_digit(frame,ROI,use_prev_box,use_detection):
+
+def predict_digit(frame,ROI,use_prev_box,use_detection,DEBUG=False):
     global prev_boxes,predictor_model
     if predictor_model is None:
         return None,None
@@ -956,12 +1062,13 @@ def predict_digit(frame,ROI,use_prev_box,use_detection):
     if len(frame_digits) != ROI[-1]:
         print("Failed to find individual digits (found %i digits our of required %i)!" % (len(frame_digits),ROI[-1]))
         return None,None
-    frame_digits = [resize_image(x, IMG_SIZE) for x in frame_digits]
-    frame_digits = np.stack(frame_digits, axis=0).astype(np.float32) / 255.0
+    raw_frame_digits = [resize_image(x, IMG_SIZE) for x in frame_digits]
+    frame_digits = np.stack(raw_frame_digits, axis=0).astype(np.float32) / 255.0
     digits = predictor_model.predict(frame_digits)
+    prob = np.prod(np.max(digits, 1))
     digits = np.argmax(digits, 1)
     digits[digits == 10] = -1
-    return digits,rectangles
+    return digits,prob,rectangles,frame_digits
 
 if __name__ == "__main__":
     if 0:
@@ -984,5 +1091,3 @@ if __name__ == "__main__":
         app = QtWidgets.QApplication(sys.argv)
         ui = MainWindow()
         sys.exit(app.exec_())
-
-
