@@ -4,6 +4,7 @@ import os
 import numpy as np
 import threading
 import time
+import datetime
 
 import sys
 import configparser
@@ -19,7 +20,7 @@ from skimage.registration import phase_cross_correlation
 config_data = configparser.ConfigParser()
 CONFIG_FILE = "config_params.cfg"
 assert os.path.exists(CONFIG_FILE)>0,"Config file with name config_params.cfg not found in program path!"
-config_data.read(CONFIG_FILE)
+config_data.read(CONFIG_FILE,encoding="UTF-8")
 
 os.add_dll_directory(config_data.get("paths","vlc_path"))
 import vlc
@@ -36,24 +37,38 @@ def set_value(entry,default):
     config_data["main"][entry] = str(val)
     return val
 
+print('Loaded config file parameters are:')
+for k in config_data.keys():
+    if k!='files':
+        print('Section = {0}'.format(k))
+        for v in config_data[k].keys():
+            print('... {0} = {1}'.format(v,config_data[k][v]))
+
 # required, no defaults
 DIGIT_MODEL = config_data.get("paths","model_path") # path to saved Keras model
 DEFAULT_PATH = config_data.get("paths","video_path") # path to running videos (MP4)
 
 # params with defaults
-PREDICT_INTERVAL = float(set_value("predict_interval",250.0))
+float(set_value("zoom_level",1))
+PREDICT_INTERVAL = float(set_value("predict_interval",400.0))
 SMOOTH_WINDOW = float(set_value("smooth_window",2.0))
-DEFAULT_SPEED = float(set_value("default_speed",6.0))
+DEFAULT_SPEED = float(set_value("default_speed",9.0))
 MAX_SPEED = float(set_value("max_speed",20))
 EXTRA_PIXEL_RATIO = float(set_value("extra_pixel_ratio",0.08))
+SHIFT_CENTER_X = int(set_value("shift_center_x",0))
+SHIFT_CENTER_Y = int(set_value("shift_center_y",0))
 
 current_running_speed = -1 # global variable
 running_speed_history = [] # keep track of previous speeds
 
+light_green = QColor(144, 238, 144)
+light_red = QColor(255, 182, 193)
+white = QColor(255, 255, 255)
+
 # FOR DEBUGGING AND DEVELOPMENT
-import pickle
 import matplotlib.pyplot as plt
-WEBCAM_VIDEO =r'' #C:\Code\MyMediaPlayer-main\mydata\\WIN_20210806_175650.MP4'#  WIN_20210719_192555.MP4'
+WEBCAM_VIDEO = '' # r"C:\Work\TreadmillApp\mydata\WIN_20210713_20_33_27_Pro.mp4"
+DEBUG_SPEED_OVERRIDE = None #13
 LOAD_MODEL = True # set false for faster loading in debugging
 
 # correlation image registering
@@ -79,7 +94,7 @@ def register_image(image,offset_image):
 # this is the window that playes the selected video with dynamic playrate
 class VideoWindow(QMainWindow):
 
-    def __init__(self,initial_video = None,default_speed = 6.0,*args, **kwargs):
+    def __init__(self,initial_video = None,default_speed = 9.0,*args, **kwargs):
         super(VideoWindow, self).__init__(*args, **kwargs)
 
         self.is_paused = False
@@ -118,9 +133,14 @@ class VideoWindow(QMainWindow):
         self.hbuttonbox.addWidget(self.playbutton)
         self.playbutton.clicked.connect(self.play_pause)
 
-        self.stopbutton = QPushButton("Stop",self)
-        self.hbuttonbox.addWidget(self.stopbutton)
-        self.stopbutton.clicked.connect(self.stop)
+        #self.stopbutton = QPushButton("Stop",self)
+        #self.hbuttonbox.addWidget(self.stopbutton)
+        #self.stopbutton.clicked.connect(self.stop)
+
+        self.timetxt = QLabel('0', self)
+        self.timetxt.setFont(QFont('Times',12))
+        self.timetxt.setAlignment(Qt.AlignCenter)
+        self.hbuttonbox.addWidget(self.timetxt)
 
         self.positionslider = QSlider(Qt.Horizontal, self)
         self.positionslider.setToolTip("Position")
@@ -131,15 +151,15 @@ class VideoWindow(QMainWindow):
         self.positionslider.sliderPressed.connect(self.set_position)
 
         self.timer = QTimer(self)
-        self.timer.setInterval(250) # polling every 250ms
+        self.timer.setInterval(500) # polling every 250ms
         self.media_duration=-1
         self.timer.timeout.connect(self.update_ui)
         self.timer.start()
 
-        self.timetxt = QLabel('0', self)
-        self.timetxt.setFont(QFont('Times',12))
-        self.timetxt.setAlignment(Qt.AlignCenter)
-        self.hbuttonbox.addWidget(self.timetxt)
+        self.timetxt_remain = QLabel('0', self)
+        self.timetxt_remain.setFont(QFont('Times',12))
+        self.timetxt_remain.setAlignment(Qt.AlignCenter)
+        self.hbuttonbox.addWidget(self.timetxt_remain)
 
         self.speedtxt = QLabel('0', self)
         self.speedtxt.setFont(QFont('Times',14))
@@ -179,6 +199,8 @@ class VideoWindow(QMainWindow):
         self.playrate = 1.0
         self.update_speed()
         self.videoPlayer.play()
+        time.sleep(1)
+        self.maxtime_ms = self.videoPlayer.get_length()
 
         self.videoFrame.setMouseTracking(True)
         self.videoFrame.mouseMoveEvent = self.mousemove
@@ -195,13 +217,15 @@ class VideoWindow(QMainWindow):
     def resizeEvent(self, event):
         x = self.rect().getCoords()
         self.playbutton.move(10, x[3] - 35)
-        self.stopbutton.move(120, x[3] - 35)
-        self.positionslider.move(250, x[3] - 35)
-        self.timetxt.move(x[2]-300, x[3] - 35)
-        self.timetxt.setFixedWidth(150)
+        #self.stopbutton.move(120, x[3] - 35)
+        self.timetxt.move(105,x[3] - 35)
+        self.timetxt.setFixedWidth(100)
+        self.positionslider.move(200, x[3] - 35)
+        self.timetxt_remain.move(x[2]-250, x[3] - 35)
+        self.timetxt_remain.setFixedWidth(100)
         self.speedtxt.move(x[2] - 160, x[3] - 35)
         self.speedtxt.setFixedWidth(150)
-        self.positionslider.setFixedWidth(x[2]-560)
+        self.positionslider.setFixedWidth(x[2]-450)
         QMainWindow.resizeEvent(self, event)
 
     def set_position(self):
@@ -220,12 +244,17 @@ class VideoWindow(QMainWindow):
 
     def update_speed(self):
         global current_running_speed
-        if current_running_speed<0:
-            self.speedtxt.setStyleSheet("color: red;  background-color: black")
+
+        if DEBUG_SPEED_OVERRIDE is not None:
+            self.playrate = max(self.min_playrate,DEBUG_SPEED_OVERRIDE/self.default_speed)
         else:
-            self.speedtxt.setStyleSheet("color: black;  background-color: white")
-            self.playrate = max(self.min_playrate,current_running_speed/self.default_speed)
-        self.speedtxt.setText('%2.1fkm/h (%.1f)' % (current_running_speed,self.playrate))
+            if current_running_speed<0:
+                self.speedtxt.setStyleSheet("color: red;  background-color: black")
+            else:
+                self.speedtxt.setStyleSheet("color: black;  background-color: white")
+                self.playrate = max(self.min_playrate,current_running_speed/self.default_speed)
+
+        self.speedtxt.setText('%2.1fkmh (%1.2f)' % (current_running_speed,self.playrate))
 
     def update_ui(self):
         """Updates the user interface"""
@@ -259,7 +288,9 @@ class VideoWindow(QMainWindow):
             pass
 
         fps = fps if fps <150 and fps>5 else -1
-        self.timetxt.setText(self.ms_to_timestr(max(0,self.videoPlayer.get_time())) + " (%1.0f)" % fps )
+        curtime = self.videoPlayer.get_time()
+        self.timetxt.setText(self.ms_to_timestr(max(0,curtime))) # + " (%1.0f)" % fps )
+        self.timetxt_remain.setText(self.ms_to_timestr(self.maxtime_ms - curtime))  # + " (%1.0f)" % fps )
         self.update_speed()
         self.videoPlayer.set_rate(self.playrate)
         #print("rate is %1.3f" % self.videoPlayer.get_rate())
@@ -279,7 +310,7 @@ class VideoWindow(QMainWindow):
         sec = sec - hours*60*60
         minutes = int(np.floor(sec/60))
         sec = sec - minutes*60
-        return "%02i:%02i:%02.2f" % (hours,minutes,sec)
+        return "%02i:%02i:%02.0f" % (hours,minutes,sec)
 
     def play_pause(self):
         """Toggle play/pause status
@@ -328,7 +359,6 @@ class VideoWindow(QMainWindow):
         self.media_duration = -1
         self.play_pause()
     '''
-
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
             if self.windowState() == Qt.WindowNoState:
@@ -348,171 +378,192 @@ class MainWindow(QDialog):
 
     def setupUi(self):
 
-        #myGUI = QtWidgets.QDialog()
+        SCALE_UI = 1.30  # Change this value to adjust the scaling
+
         myGUI = self
         myGUI.setObjectName("myGUI")
-        myGUI.resize(875, 461)
+        myGUI.resize(int(875 * SCALE_UI), int(461 * SCALE_UI))
         myGUI.setMaximumWidth(myGUI.width())
         myGUI.setMaximumHeight(myGUI.height())
 
         self.precision_group = QtWidgets.QButtonGroup(myGUI)
         self.precision0 = QtWidgets.QRadioButton(myGUI)
-        self.precision0.setGeometry(QtCore.QRect(800, 280, 41, 31))
+        self.precision0.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(280 * SCALE_UI), int(41 * SCALE_UI), int(31 * SCALE_UI)))
         self.precision0.setObjectName("precision0")
         self.precision1 = QtWidgets.QRadioButton(myGUI)
-        self.precision1.setGeometry(QtCore.QRect(800, 310, 41, 17))
+        self.precision1.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(310 * SCALE_UI), int(41 * SCALE_UI), int(17 * SCALE_UI)))
         self.precision1.setObjectName("precision1")
         self.precision2 = QtWidgets.QRadioButton(myGUI)
-        self.precision2.setGeometry(QtCore.QRect(800, 330, 41, 17))
+        self.precision2.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(330 * SCALE_UI), int(41 * SCALE_UI), int(17 * SCALE_UI)))
         self.precision2.setObjectName("precision2")
         self.precision3 = QtWidgets.QRadioButton(myGUI)
-        self.precision3.setGeometry(QtCore.QRect(800, 350, 41, 17))
+        self.precision3.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(350 * SCALE_UI), int(41 * SCALE_UI), int(17 * SCALE_UI)))
         self.precision3.setObjectName("precision3")
 
-        self.zoomlevel = QtWidgets.QSlider(Qt.Horizontal,myGUI)
-        self.zoomlevel.setGeometry(QtCore.QRect(800, 373, 41, 16))
+        self.zoomlevel = QtWidgets.QSlider(Qt.Horizontal, myGUI)
+        self.zoomlevel.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(373 * SCALE_UI), int(41 * SCALE_UI), int(16 * SCALE_UI)))
         self.zoomlevel.setMinimum(1)
         self.zoomlevel.setMaximum(3)
-        self.zoomlevel.setValue(1)
+        self.zoomlevel.setValue(int(float(config_data.get("main", "zoom_level"))))
         self.zoomlevel.setSingleStep(1)
         self.zoomlevel.setTickInterval(1)
         self.zoomlevel.setObjectName("zoomlevel")
+        self.zoomlevel.valueChanged.connect(self.zoom_level_changed)
 
         self.label_zoom = QtWidgets.QLabel(myGUI)
-        self.label_zoom.setGeometry(QtCore.QRect(770, 373,35, 16))
+        self.label_zoom.setGeometry(QtCore.QRect(int(770 * SCALE_UI), int(373 * SCALE_UI), int(35 * SCALE_UI), int(16 * SCALE_UI)))
         self.label_zoom.setObjectName("label_zoom")
 
         self.precision1.setChecked(1)
-        self.precision_group.addButton(self.precision0,0)
-        self.precision_group.addButton(self.precision1,1)
-        self.precision_group.addButton(self.precision2,2)
-        self.precision_group.addButton(self.precision3,3)
+        self.precision_group.addButton(self.precision0, 0)
+        self.precision_group.addButton(self.precision1, 1)
+        self.precision_group.addButton(self.precision2, 2)
+        self.precision_group.addButton(self.precision3, 3)
         self.precision_group.buttonClicked.connect(self.precision_event)
 
         self.digitcount_group = QtWidgets.QButtonGroup(myGUI)
         self.digitcount2 = QtWidgets.QRadioButton(myGUI)
-        self.digitcount2.setGeometry(QtCore.QRect(800, 170, 41, 17))
+        self.digitcount2.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(170 * SCALE_UI), int(41 * SCALE_UI), int(17 * SCALE_UI)))
         self.digitcount2.setObjectName("digitcount2")
         self.digitcount4 = QtWidgets.QRadioButton(myGUI)
-        self.digitcount4.setGeometry(QtCore.QRect(800, 210, 41, 17))
+        self.digitcount4.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(210 * SCALE_UI), int(41 * SCALE_UI), int(17 * SCALE_UI)))
         self.digitcount4.setObjectName("digitcount4")
         self.digitcount5 = QtWidgets.QRadioButton(myGUI)
-        self.digitcount5.setGeometry(QtCore.QRect(800, 230, 41, 16))
+        self.digitcount5.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(230 * SCALE_UI), int(41 * SCALE_UI), int(16 * SCALE_UI)))
         self.digitcount5.setObjectName("digitcount5")
         self.digitcount1 = QtWidgets.QRadioButton(myGUI)
-        self.digitcount1.setGeometry(QtCore.QRect(800, 140, 41, 31))
+        self.digitcount1.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(140 * SCALE_UI), int(41 * SCALE_UI), int(31 * SCALE_UI)))
         self.digitcount1.setObjectName("digitcount1")
         self.digitcount3 = QtWidgets.QRadioButton(myGUI)
-        self.digitcount3.setGeometry(QtCore.QRect(800, 190, 41, 17))
+        self.digitcount3.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(190 * SCALE_UI), int(41 * SCALE_UI), int(17 * SCALE_UI)))
         self.digitcount3.setObjectName("digitcount3")
         self.digitcount_group.buttonClicked.connect(self.digitcount_event)
 
         self.digitcount3.setChecked(1)
-        self.digitcount_group.addButton(self.digitcount1,1)
-        self.digitcount_group.addButton(self.digitcount2,2)
-        self.digitcount_group.addButton(self.digitcount3,3)
-        self.digitcount_group.addButton(self.digitcount4,4)
-        self.digitcount_group.addButton(self.digitcount5,5)
+        self.digitcount_group.addButton(self.digitcount1, 1)
+        self.digitcount_group.addButton(self.digitcount2, 2)
+        self.digitcount_group.addButton(self.digitcount3, 3)
+        self.digitcount_group.addButton(self.digitcount4, 4)
+        self.digitcount_group.addButton(self.digitcount5, 5)
 
         self.label = QtWidgets.QLabel(myGUI)
-        self.label.setGeometry(QtCore.QRect(780, 120, 51, 20))
+        self.label.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(120 * SCALE_UI), int(51 * SCALE_UI), int(20 * SCALE_UI)))
         self.label.setObjectName("label")
         self.label_2 = QtWidgets.QLabel(myGUI)
-        self.label_2.setGeometry(QtCore.QRect(790, 260, 51, 20))
+        self.label_2.setGeometry(QtCore.QRect(int(790 * SCALE_UI), int(260 * SCALE_UI), int(51 * SCALE_UI), int(20 * SCALE_UI)))
         self.label_2.setObjectName("label_2")
 
         self.regionselection = QtWidgets.QLabel(myGUI)
-        self.regionselection.setGeometry(QtCore.QRect(500,70,150, 20))
+        self.regionselection.setGeometry(QtCore.QRect(int(500 * SCALE_UI), int(70 * SCALE_UI), int(150 * SCALE_UI), int(20 * SCALE_UI)))
         self.regionselection.setObjectName("regionselection")
         self.regionselection.setText("No ROI selected")
 
         self.lcdNumber = QtWidgets.QLCDNumber(myGUI)
-        self.lcdNumber.setGeometry(QtCore.QRect(630, 15, 131, 31))
+        self.lcdNumber.setGeometry(QtCore.QRect(int(630 * SCALE_UI), int(15 * SCALE_UI), int(131 * SCALE_UI), int(31 * SCALE_UI)))
         self.lcdNumber.setObjectName("lcdNumber")
         self.lcdNumber.setSegmentStyle(QtWidgets.QLCDNumber.Flat)
         self.lcdNumber.setStyleSheet("QLCDNumber { background-color: rgb(255, 255,255);color: rgb(0,255,0);font-weight: bold;}")
 
         self.frames_per_sec = QtWidgets.QLabel(myGUI)
-        self.frames_per_sec.setGeometry(QtCore.QRect(660, 60, 100, 28))
+        self.frames_per_sec.setGeometry(QtCore.QRect(int(660 * SCALE_UI), int(60 * SCALE_UI), int(100 * SCALE_UI), int(28 * SCALE_UI)))
         self.frames_per_sec.setText("0 frames/sec")
 
         self.medianbox = QtWidgets.QCheckBox(myGUI)
-        self.medianbox.setGeometry(QtCore.QRect(780, 400, 81, 17))
+        self.medianbox.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(400 * SCALE_UI), int(81 * SCALE_UI), int(17 * SCALE_UI)))
         self.medianbox.setTristate(False)
         self.medianbox.setChecked(False)
         self.medianbox.setObjectName("medianbox")
-        if int(config_data.get("main", "median_box"))==1:
+        if int(config_data.get("main", "median_box")) == 1:
             self.medianbox.setChecked(True)
         else:
             self.medianbox.setChecked(False)
 
         self.tracking = QtWidgets.QCheckBox(myGUI)
-        self.tracking.setGeometry(QtCore.QRect(780,25, 81, 17))
+        self.tracking.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(25 * SCALE_UI), int(81 * SCALE_UI), int(17 * SCALE_UI)))
         self.tracking.setTristate(False)
         self.tracking.setChecked(True)
         self.tracking.setObjectName("tracking")
         self.tracking.clicked.connect(self.start_camera)
 
         self.boxdetect = QtWidgets.QCheckBox(myGUI)
-        self.boxdetect.setGeometry(QtCore.QRect(780, 420, 81, 17))
+        self.boxdetect.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(420 * SCALE_UI), int(81 * SCALE_UI), int(17 * SCALE_UI)))
         self.boxdetect.setTristate(False)
         self.boxdetect.setObjectName("boxdetect")
-        if int(config_data.get("main", "box_detect"))==1:
+        if int(config_data.get("main", "box_detect")) == 1:
             self.boxdetect.setChecked(True)
         else:
             self.boxdetect.setChecked(False)
 
         self.graphicsView = QtWidgets.QLabel(myGUI)
-        self.graphicsView.setGeometry(QtCore.QRect(350, 90, 411, 331))
+        self.graphicsView.setGeometry(QtCore.QRect(int(335 * SCALE_UI), int(100 * SCALE_UI), int(431 * SCALE_UI), int(351 * SCALE_UI)))
         self.graphicsView.setObjectName("graphicsView")
 
         self.videopathEdit = QtWidgets.QTextEdit(myGUI)
-        self.videopathEdit.setGeometry(QtCore.QRect(90, 10, 421, 31))
+        self.videopathEdit.setGeometry(QtCore.QRect(int(90 * SCALE_UI), int(10 * SCALE_UI), int(421 * SCALE_UI), int(31 * SCALE_UI)))
         self.videopathEdit.setObjectName("textEdit")
         self.videopathEdit.setText(DEFAULT_PATH)
         self.videopathEdit.textChanged.connect(self.updatefiles)
 
         self.label_3 = QtWidgets.QLabel(myGUI)
-        self.label_3.setGeometry(QtCore.QRect(550,20, 71, 16))
+        self.label_3.setGeometry(QtCore.QRect(int(550 * SCALE_UI), int(20 * SCALE_UI), int(71 * SCALE_UI), int(16 * SCALE_UI)))
         self.label_3.setObjectName("label_3")
         self.listWidget = QtWidgets.QListWidget(myGUI)
-        self.listWidget.setGeometry(QtCore.QRect(20, 90, 311, 341))
+        self.listWidget.setGeometry(QtCore.QRect(int(20 * SCALE_UI), int(90 * SCALE_UI), int(311 * SCALE_UI), int(341 * SCALE_UI)))
         self.listWidget.setObjectName("listWidget")
         self.listWidget.itemClicked.connect(self.onClickedFile)
+        self.listWidget.currentItemChanged.connect(self.onClickedFile)
 
         self.source_group = QtWidgets.QButtonGroup(myGUI)
         self.source0 = QtWidgets.QRadioButton(myGUI)
-        self.source0.setGeometry(QtCore.QRect(780, 50, 71, 17))
+        self.source0.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(50 * SCALE_UI), int(71 * SCALE_UI), int(17 * SCALE_UI)))
         self.source0.setObjectName("source0")
         self.source1 = QtWidgets.QRadioButton(myGUI)
-        self.source1.setGeometry(QtCore.QRect(780, 70, 71, 17))
+        self.source1.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(70 * SCALE_UI), int(71 * SCALE_UI), int(17 * SCALE_UI)))
         self.source1.setObjectName("source1")
-        self.source_group.addButton(self.source0,0)
-        self.source_group.addButton(self.source1,1)
+        self.source_group.addButton(self.source0, 0)
+        self.source_group.addButton(self.source1, 1)
         self.source_group.buttonClicked.connect(self.source_event)
-        if int(config_data.get("main", "source"))==0:
+        if int(config_data.get("main", "source")) == 0:
             self.source0.setChecked(True)
         else:
             self.source1.setChecked(True)
 
         self.label_4 = QtWidgets.QLabel(myGUI)
-        self.label_4.setGeometry(QtCore.QRect(20, 10, 71, 16))
+        self.label_4.setGeometry(QtCore.QRect(int(20 * SCALE_UI), int(10 * SCALE_UI), int(71 * SCALE_UI), int(16 * SCALE_UI)))
         self.label_4.setObjectName("label_4")
         self.playButton = QtWidgets.QPushButton(myGUI)
-        self.playButton.setGeometry(QtCore.QRect(410, 60, 75, 23))
+        self.playButton.setGeometry(QtCore.QRect(int(410 * SCALE_UI), int(60 * SCALE_UI), int(75 * SCALE_UI), int(23 * SCALE_UI)))  # left, top, width and height
         self.playButton.setObjectName("play")
         self.playButton.clicked.connect(self.play_movie)
         self.playButton.setEnabled(False)
 
         self.videospeedEdit = QtWidgets.QTextEdit(myGUI)
-        self.videospeedEdit.setGeometry(QtCore.QRect(340,60,65, 23))
+        self.videospeedEdit.setGeometry(QtCore.QRect(int(333 * SCALE_UI), int(60 * SCALE_UI), int(45 * SCALE_UI), int(23 * SCALE_UI)))
         self.videospeedEdit.setObjectName("videospeed")
         self.videospeedEdit.setText("")
         self.videospeedEdit.textChanged.connect(self.edited_speed)
         self.videospeedEdit.setEnabled(False)
 
+        self.scoregoodbutton = QtWidgets.QPushButton(myGUI)
+        self.scoregoodbutton.setGeometry(QtCore.QRect(int(380 * SCALE_UI), int(50 * SCALE_UI), int(25 * SCALE_UI), int(23 * SCALE_UI)))
+        self.scoregoodbutton.setObjectName("scorebutton_good")
+        self.scoregoodbutton.setText("")
+        self.scoregoodbutton.setStyleSheet("background-color: white;")
+        self.scoregoodbutton.clicked.connect(self.on_click_button_good)
+        self.scoregoodbutton.setEnabled(False)
+
+        self.scorebadbutton = QtWidgets.QPushButton(myGUI)
+        self.scorebadbutton.setGeometry(QtCore.QRect(int(380 * SCALE_UI), int(75 * SCALE_UI), int(25 * SCALE_UI), int(23 * SCALE_UI)))
+        self.scorebadbutton.setObjectName("scorebutton_bad")
+        self.scorebadbutton.setText("")
+        self.scorebadbutton.setStyleSheet("background-color: white;")
+        self.scorebadbutton.clicked.connect(self.on_click_button_bad)
+        self.scorebadbutton.setEnabled(False)
+        #self.scoregoodEdit.textChanged.connect(self.edited_speed)
+        #self.scoregoodEdit.setEnabled(False)
+
         self.currentvideoEdit = QtWidgets.QPlainTextEdit(myGUI)
-        self.currentvideoEdit.setGeometry(QtCore.QRect(20, 60, 311,21))
+        self.currentvideoEdit.setGeometry(QtCore.QRect(int(20 * SCALE_UI), int(60 * SCALE_UI), int(311 * SCALE_UI), int(21 * SCALE_UI)))
         self.currentvideoEdit.setObjectName("plainTextEdit")
         self.currentvideoEdit.setReadOnly(True)
 
@@ -536,6 +587,7 @@ class MainWindow(QDialog):
         self.retranslateUi(myGUI)
         QtCore.QMetaObject.connectSlotsByName(myGUI)
 
+        self.filelist = None
         self.updatefiles()
         self.chosen_file=None
 
@@ -551,6 +603,29 @@ class MainWindow(QDialog):
         self.start_camera()
         self.show()
 
+    def on_click_button_good(self):
+        if self.chosen_file is not None:
+            if self.chosen_file["score"]==1:
+                self.chosen_file["score"]=0
+                self.scoregoodbutton.setStyleSheet("background-color: white;")
+            else:
+                self.chosen_file["score"] = 1
+                self.scoregoodbutton.setStyleSheet("background-color: green;")
+            self.scorebadbutton.setStyleSheet("background-color: white;")
+            self.update_filedata()
+            self.save_configs()
+
+    def on_click_button_bad(self):
+        if self.chosen_file is not None:
+            if self.chosen_file["score"] == -1:
+                self.chosen_file["score"] = 0
+                self.scorebadbutton.setStyleSheet("background-color: white;")
+            else:
+                self.chosen_file["score"] = -1
+                self.scorebadbutton.setStyleSheet("background-color: red;")
+            self.scoregoodbutton.setStyleSheet("background-color: white;")
+            self.update_filedata()
+            self.save_configs()
     def edited_speed(self):
         pass
 
@@ -585,6 +660,8 @@ class MainWindow(QDialog):
     # webcam frame click release, gets coordinate 2
     def mouseup(self,e):
         # Record ending (x,y) coordintes on left mouse bottom release
+        pass
+        '''
         if e.button()==1 and not(self.selected_ROI) and self.frame_shape is not None:
             x = e.x()
             y = e.y()
@@ -594,19 +671,37 @@ class MainWindow(QDialog):
 
             # update config file
             config_data["main"]["roi"] = "%i,%i,%i,%i,%i" % (self.coordinate1[0],self.coordinate1[1],self.coordinate2[0],self.coordinate2[1],self.zoomlevel.value())
-            with open(CONFIG_FILE, 'w') as configfile:
+            with open(CONFIG_FILE, 'w',encoding="UTF-8") as configfile:
                 config_data.write(configfile)
+        '''
+    def zoom_level_changed(self,value):
+        config_data["main"]['zoom_level'] = str(value)
+        self.save_configs()
 
+    def save_configs(self):
+        with open(CONFIG_FILE, 'w', encoding="UTF-8") as configfile:
+            config_data.write(configfile)
     # clicked webcam frame
     def mousedown(self, e):
         # Record starting (x,y) coordinates on left mouse button click
         if e.button()==1 and not(self.selected_ROI) and self.frame_shape is not None:
-                x = e.x()
-                y = e.y()
+            x = e.x()
+            y = e.y()
+            if self.coordinate1 is None:
                 self.coordinate1 = (x, y,self.zoomlevel.value())
                 self.coordinate2 = None
                 self.selected_ROI = False
-                print("mouse coord 1 (x, y) = (%i, %i)" % (self.coordinate1[0],self.coordinate1[1]))
+                print("mouse coord 1 (x, y) = (%i, %i)" % (self.coordinate1[0], self.coordinate1[1]))
+            else:
+                self.coordinate2 = (x, y, self.zoomlevel.value())
+                print("mouse coord 2 (x, y) = (%i, %i)" % (self.coordinate2[0], self.coordinate2[1]))
+                self.selected_ROI = True
+                # update config file
+                config_data["main"]["roi"] = "%i,%i,%i,%i,%i" % (
+                    self.coordinate1[0], self.coordinate1[1], self.coordinate2[0], self.coordinate2[1],
+                    self.zoomlevel.value())
+                self.save_configs()
+
         # Clear drawing boxes on right mouse button click
         elif e.button()==2:
             self.selected_ROI = False
@@ -630,14 +725,14 @@ class MainWindow(QDialog):
     # function to capture and analyze webcam stream (running as separate thread)
     def camera_update(self,device):
         global running_speed_history,current_running_speed
-        INITIAL_FRAMES = 5 # initial frames to set-up template frame
+        INITIAL_FRAMES = 8 # initial frames to set-up template frame
 
         DEBUGGING_MODE = False
         if len(WEBCAM_VIDEO)>0:
+            DEBUGGING_MODE = True
             assert os.path.exists(WEBCAM_VIDEO),"Webcam video not found!"
             print("!! Loading webcam video instead of actual stream (DEBUGGING)!!")
             self.capture = cv2.VideoCapture(WEBCAM_VIDEO)
-            DEBUGGING_MODE = True
             old_images= [None,None,None]
             image_num = 0
             debug_fig,debug_ax = plt.subplots(1, 3, figsize=[3 * 3,3])
@@ -651,7 +746,6 @@ class MainWindow(QDialog):
         print("Starting video capture")
         init_run=0
         template_frame = 0 # this will be FFT transformed
-        template_frame_real=None
         zoom_cut = {}
         zoom_multiplier = {}
         old_ROI=None
@@ -675,6 +769,7 @@ class MainWindow(QDialog):
             y1 = int(y1 * self.frame_scaling["height"])
             x2 = int(x2 * self.frame_scaling["width"])
             y2 = int(y2 * self.frame_scaling["height"])
+            
 
             return x1, y1, x2, y2
 
@@ -692,6 +787,14 @@ class MainWindow(QDialog):
                 #    frame = template_frame_real
                 #else:
                 (status, frame) = self.capture.read()
+                
+                #print('frame.shape = %s' % str(frame.shape))
+                frame = np.roll(frame,SHIFT_CENTER_X,axis=1)
+                frame = np.roll(frame,SHIFT_CENTER_Y,axis=0)
+
+                if frame is None or not(isinstance(frame,np.ndarray)):
+                    print('obtained frame is not valid (type %s)!' % str(type(frame)))
+                    continue
 
                 frame_num+=1
 
@@ -702,9 +805,11 @@ class MainWindow(QDialog):
                     pixmap = pixmap.scaled(self.graphicsView.width(), self.graphicsView.height(), QtCore.Qt.KeepAspectRatio)
 
                     init_run+=1
-                    template_frame += frame/INITIAL_FRAMES
+                    template_frame += frame.astype(float)/INITIAL_FRAMES
                     if init_run==INITIAL_FRAMES:
-                        template_frame_real = template_frame.astype(np.uint8)
+                        #template_frame_real = template_frame.astype(np.uint8)
+                        #print('template_frame.shape = %s' % str(template_frame.shape))
+                        
                         template_frame = np.fft.fft2(cv2.cvtColor(template_frame.astype(np.uint8),cv2.COLOR_BGR2GRAY))
 
                         self.frame_shape = {"width":frame.shape[1],"height":frame.shape[0]}  # put this here to make sure we have also padding defined
@@ -741,7 +846,8 @@ class MainWindow(QDialog):
                             # scale coordinated to actual frame
                             ROI = [x1,y1,x2,y2,self.digitcount] # [x1,y1,x2,y2,digit_count]
 
-                            if ((x2-x1)*(y2-y1)<100) or (ROI[2]>frame.shape[1]) or (ROI[3]>frame.shape[0]) or (self.coordinate1[2] != self.coordinate2[2]):
+                            # (x2-x1) = width
+                            if (x2-x1)<40 or (y2-y1)<20 or (ROI[2]>frame.shape[1]) or (ROI[3]>frame.shape[0]) or (self.coordinate1[2] != self.coordinate2[2]):
                                 print("Bad ROI, resetting")
                                 self.selected_ROI = False
                                 self.coordinate1 = None
@@ -784,8 +890,8 @@ class MainWindow(QDialog):
                             current_running_speed = speed_estimator(timestamp,running_speed_history)
 
                             # only keep last 100 measurements
-                            if len(running_speed_history)>100:
-                                running_speed_history = running_speed_history[-100:]
+                            if len(running_speed_history)>50:
+                                running_speed_history = running_speed_history[-50:]
 
                             self.lcdNumber.display("{1:,.{0}f}".format(self.precision,current_running_speed))
                             self.frames_per_sec.setText("%.2f frames/sec" % (1.0 / (max(0.0001,time.time()-now))))
@@ -835,37 +941,92 @@ class MainWindow(QDialog):
 
     def updatefiles(self):
         # read all files with specific extension
-        files = glob.glob(self.videopathEdit.toPlainText() + os.sep + "*.mp4")
-        files += glob.glob(self.videopathEdit.toPlainText() + os.sep + "*.webm")
-        files += glob.glob(self.videopathEdit.toPlainText() + os.sep + "*.mkv")
-        files.sort(key=os.path.getmtime, reverse=True) # sort by modified date
-        files = [f.replace(self.videopathEdit.toPlainText() + os.sep, '') for f in files]
-        self.listWidget.clear()
-        for f in files:
-            self.listWidget.addItem(f)
-        files_with_rates = [[f,str(DEFAULT_SPEED)] for f in files]
+        ROOT_PATH = self.videopathEdit.toPlainText() + os.sep
+        files = glob.glob(ROOT_PATH + "*.mp4")
+        files += glob.glob(ROOT_PATH + "*.webm")
+        files += glob.glob(ROOT_PATH + "*.mkv")
+        files += glob.glob(ROOT_PATH + "*.avi")
+        files = [{"full_filename":x,"filename":x.replace(ROOT_PATH, ''),"size":os.path.getsize(x),"rate":DEFAULT_SPEED,"duration":-1,'score':0} for x in files]
 
         # update config file
-        old_files = {k:config_data["defaults"].get(k).split(":") for k in list(config_data["defaults"])}
-        for k1,old_file in old_files.items():
-            for k2,file_with_rate in enumerate(files_with_rates):
-                if old_file[0]==file_with_rate[0]:
-                    files_with_rates[k2][1] = old_files[k1][1]
-        config_data["files"] = {i:":".join(f) for i,f in enumerate(files_with_rates)}
-        with open(CONFIG_FILE, 'w') as configfile:
-            config_data.write(configfile)
+        count = 0
+        old_files = {k:config_data["files"].get(k).split(":") for k in list(config_data["files"])}
+        for k,old_file in old_files.items():
+            for f in files:
+                if int(old_file[1])==f["size"]:
+                    try:
+                        f["rate"] = float(old_file[2])
+                        f["duration"] = float(old_file[3])                
+                        f['score'] = float(old_file[4])
+                        count+=1
+                    except:
+                        print('failed to read old parameters for video "%s"' % old_file[0])
 
-    def onClickedFile(self,item):
-        self.chosen_file = [self.videopathEdit.toPlainText(),item.text()]
+        print("loaded %i videos with %i new ones" % (len(files),len(files)-count))
+
+        # count the number of frames
+        print("computing playtime")
+        k = 0
+        for f in files:
+            if f["duration"]==-1:
+                k+=1
+                try:
+                    video_obj = cv2.VideoCapture(f["full_filename"])
+                    frames = video_obj.get(cv2.CAP_PROP_FRAME_COUNT)
+                    fps = int(video_obj.get(cv2.CAP_PROP_FPS))
+                    # calculate dusration of the video
+                    seconds = int(frames / fps)
+                    f["duration"] = seconds/60.0
+                except:
+                    f["duration"] = 35.0
+                    print("!! failed to extract video duration for file %s !!" % f["filename"])
+            f["playtime"] = f["duration"]*f["rate"]/DEFAULT_SPEED
+
+        files.sort(key= lambda x:x["playtime"], reverse=True) # sort by modified date
+
+        self.filelist = {}
+        self.listWidget.clear()
+        for f in files:
+            label = '%imin - %s' % (round(f["playtime"]),f["filename"])
+            self.filelist[label] = f
+            item = QListWidgetItem(label)
+            if f['score']==1:
+                item.setBackground(QBrush(light_green))
+            elif f['score']==-1:
+                item.setBackground(QBrush(light_red))
+            else:
+                item.setBackground(QBrush(white))
+            self.listWidget.addItem(item)
+
+        #print("saving configs")
+        #config_data["files"] = {i:":".join([f["filename"],str(f["size"]),str(f["rate"]),str(round(f["duration"],3))]) for i,f in enumerate(files)}
+        #with open(CONFIG_FILE, 'w',encoding="UTF-8") as configfile:
+        #    config_data.write(configfile)
+
+    def onClickedFile(self,item=None):
+        if item is None:
+            item = self.currentItem()
         self.currentvideoEdit.setPlainText(item.text())
         self.playButton.setEnabled(True)
         self.videospeedEdit.setEnabled(True)
-        saved_files = {k:config_data["files"].get(k).split(":") for k in list(config_data["files"])}
-        for k,file in saved_files.items():
-            if self.chosen_file[1] in file[0]:
-                self.defaultspeed = float(file[1])
+        self.scorebadbutton.setEnabled(True)
+        self.scoregoodbutton.setEnabled(True)
+
+        #saved_files = {k:config_data["files"].get(k).split(":") for k in list(config_data["files"])}
+        selected_file = self.filelist[item.text()]
+        self.chosen_file = selected_file
+        #for k,file in saved_files.items():
+        #    if self.chosen_file[1] in file[0]:
+        self.defaultspeed = float(selected_file["rate"])
         self.videospeedEdit.setText(str(self.defaultspeed))
 
+        score = float(selected_file["score"])
+        self.scoregoodbutton.setStyleSheet("background-color: white;")
+        self.scorebadbutton.setStyleSheet("background-color: white;")
+        if score==1:
+            self.scoregoodbutton.setStyleSheet("background-color: green;")
+        if score==-1:
+            self.scorebadbutton.setStyleSheet("background-color: red;")
     def retranslateUi(self, myGUI):
         _translate = QtCore.QCoreApplication.translate
         myGUI.setWindowTitle(_translate("myGUI", "TreadmillApp"))
@@ -890,32 +1051,55 @@ class MainWindow(QDialog):
         self.label_4.setText(_translate("myGUI", "current path"))
         self.playButton.setText(_translate("myGUI", "Play selected"))
 
+    def update_filedata(self):
+        if self.chosen_file is not None:
+            old_files = {k:config_data["files"].get(k).split(":") for k in list(config_data["files"])}
+            found=False
+            new_data_entry = ":".join([
+                self.chosen_file["filename"],
+                str(self.chosen_file["size"]),
+                str(self.chosen_file["rate"]),
+                str(round(self.chosen_file["duration"], 3)),
+                str(self.chosen_file["score"]),
+            ])
+            # is the file already in database? If not, add.
+            for k,old_file in old_files.items():
+                if int(old_file[1])==self.chosen_file['size']:
+                    config_data["files"][k] = new_data_entry
+                    found=True
+                    break
+            if found is False:
+                config_data["files"][str(len(config_data["files"]))] = new_data_entry
+
+            for index in range(self.listWidget.count()):
+                item = self.listWidget.item(index)
+                label = item.text()
+                itemdata = self.filelist[label]
+                if itemdata['full_filename']==self.chosen_file['full_filename']:
+                    self.filelist[label]['score']=self.chosen_file['score']
+                    if self.chosen_file['score'] == 1:
+                        item.setBackground(QBrush(light_green))
+                    elif self.chosen_file['score'] == -1:
+                        item.setBackground(QBrush(light_red))
+                    else:
+                        item.setBackground(QBrush(white))
+
     # play selected video
     def play_movie(self):
         # first set and save default speed
         self.defaultspeed = float(self.videospeedEdit.toPlainText())
-        files_with_rates = {k: config_data["files"].get(k).split(":") for k in list(config_data["files"])}
-        item=None
-        for k,file in files_with_rates.items():
-            if self.chosen_file[1] in file[0]:
-                config_data["files"][str(k)] = ":".join([file[0],str(self.defaultspeed)])
-                item = [file[0],str(self.defaultspeed)]
-        assert item is not None,"selected file not found in file list!"
-        old_files = {k:config_data["defaults"].get(k).split(":") for k in list(config_data["defaults"])}
-        found=False
-        # is the file already in database? If not, add.
-        for k1,old_file in old_files.items():
-            if old_file[0]==item[0]:
-                config_data["defaults"][k1] = ":".join(item)
-                found=True
+        for k,f in self.filelist.items():
+            if f["size"] == self.chosen_file['size']:
+                f["rate"] = self.defaultspeed
                 break
-        if found is False:
-            config_data["defaults"][str(len(config_data["defaults"]))] = ":".join(item)
-        with open(CONFIG_FILE, 'w') as configfile:
-            config_data.write(configfile)
+
+        self.update_filedata()
+
+        print("writing updated rate (%.3f)" % self.defaultspeed)
+        self.save_configs()
 
         # finally play video in separate window
-        self.videowindow = VideoWindow((os.sep).join(self.chosen_file),self.defaultspeed)
+        self.videowindow = VideoWindow(self.chosen_file['full_filename'],self.defaultspeed)
 
     def closeEvent(self, event):
         if self.videowindow is not None:
@@ -928,18 +1112,17 @@ def weighted_median(data, weights):
       weights (list or numpy.array): weights
     """
     data, weights = np.array(data).squeeze(), np.array(weights).squeeze()
-    s_data, s_weights = map(np.array, zip(*sorted(zip(data, weights))))
-    midpoint = 0.5 * sum(s_weights)
+    sorted_indices = np.argsort(data)
+    data, weights = data[sorted_indices], weights[sorted_indices]
+    cumulative_weights = np.cumsum(weights)
+    midpoint = 0.5 * cumulative_weights[-1]
     if any(weights > midpoint):
-        w_median = (data[weights == np.max(weights)])[0]
-    else:
-        cs_weights = np.cumsum(s_weights)
-        idx = np.where(cs_weights <= midpoint)[0][-1]
-        if cs_weights[idx] == midpoint:
-            w_median = np.mean(s_data[idx:idx+2])
-        else:
-            w_median = s_data[idx+1]
-    return w_median
+        return (data[weights == np.max(weights)])[0]
+    median_idx = np.searchsorted(cumulative_weights, midpoint)
+    if cumulative_weights[median_idx] == midpoint:
+        return np.mean(data[median_idx:median_idx + 2])
+    return data[median_idx]
+    
 # function to compute speed from current and historical measurements
 def speed_estimator(current_time,running_speed_history):
     prev_speeds = []
@@ -1032,14 +1215,14 @@ def resize_image(img, size=(28,28),PAD = 0):
         #new_im = cv2.copyMakeBorder(mask,extra_pad,extra_pad,extra_pad,extra_pad, cv2.BORDER_CONSTANT, value=[0,0,0])
         assert new_im.shape == IMG_SIZE
         return new_im
-    elif new_aspect_ratio<aspect_ratio: # new image is wider, so need padding to width
+    elif new_aspect_ratio<aspect_ratio: # new image is too narrow, so need padding to width
         tmp_size = [size[0],int(np.round(size[0]/aspect_ratio))]
         new_im = cv2.resize(img,[tmp_size[1],tmp_size[0]],interpolation)
         P = size[1]-new_im.shape[1]
         new_im = cv2.copyMakeBorder(new_im,0,0,int(P/2),0, cv2.BORDER_CONSTANT, value=median_color)  # top, bottom, left, right
         new_im = cv2.copyMakeBorder(new_im, 0, 0,0,size[1]-new_im.shape[1], cv2.BORDER_CONSTANT, value=median_color)  # top, bottom, left, right
-    else:
-        tmp_size = [int(np.round(size[1]/aspect_ratio)),size[1]]
+    else: # new image is too wide, so need padding to height
+        tmp_size = [int(np.round(size[1]*aspect_ratio)),size[1]]
         new_im = cv2.resize(img,[tmp_size[1],tmp_size[0]],interpolation)
         P = size[0]-new_im.shape[0]
         new_im = cv2.copyMakeBorder(new_im,int(P/2),0,0,0, cv2.BORDER_CONSTANT, value=median_color)  # top, bottom, left, right
@@ -1057,11 +1240,11 @@ predictor_model = None
 def predict_digit(frame,ROI,use_prev_box,use_detection,DEBUG=False):
     global prev_boxes,predictor_model
     if predictor_model is None:
-        return None,None
+        return None,None,None,None
     frame_digits, prev_boxes, rectangles = image_preprocessor(frame,ROI,use_prev_box,use_detection,prev_boxes=prev_boxes)
     if len(frame_digits) != ROI[-1]:
         print("Failed to find individual digits (found %i digits our of required %i)!" % (len(frame_digits),ROI[-1]))
-        return None,None
+        return None,None,None,None
     raw_frame_digits = [resize_image(x, IMG_SIZE) for x in frame_digits]
     frame_digits = np.stack(raw_frame_digits, axis=0).astype(np.float32) / 255.0
     digits = predictor_model.predict(frame_digits)
@@ -1073,7 +1256,7 @@ def predict_digit(frame,ROI,use_prev_box,use_detection,DEBUG=False):
 if __name__ == "__main__":
     if 0:
         app = QtWidgets.QApplication(sys.argv)
-        ui = VideoWindow(r'D:\JanneK\Documents\git_repos\MyMediaPlayer-main\run_videos\30min - 5 Miles Run along the Corniche in Doha Qatar   Virtual Fitness TV virtualfitnesstv.com (playlist) (via Skyload).mp4',4.0)
+        ui = VideoWindow('',4.0)
         sys.exit(app.exec_())
     else:
         if LOAD_MODEL:
@@ -1090,4 +1273,5 @@ if __name__ == "__main__":
         print("Starting application")
         app = QtWidgets.QApplication(sys.argv)
         ui = MainWindow()
+        #QtCore.QTimer.singleShot(0,ui.close)
         sys.exit(app.exec_())
