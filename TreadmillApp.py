@@ -26,7 +26,7 @@ config_data.read(CONFIG_FILE,encoding="UTF-8")
 os.add_dll_directory(config_data.get("paths","vlc_path"))
 import vlc
 
-os.environ["CUDA_VISIBLE_DEVICES"]="-1"  # use CPU
+#os.environ["CUDA_VISIBLE_DEVICES"]="-1"  # use CPU
 
 if config_data.get("main","model_type") == 'tensorflow':
     from tensorflow.keras.models import load_model

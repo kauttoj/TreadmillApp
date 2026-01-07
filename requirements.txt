@@ -1,0 +1,38 @@
+# TreadmillApp Requirements
+# Developed in 2022 - uses older library versions
+
+# Core GUI framework
+PyQt5==5.15.7
+
+# Computer vision and image processing
+opencv-python==4.6.0.66
+scikit-image==0.19.3
+Pillow==9.2.0
+
+# Numerical computing
+numpy==1.23.5
+
+# Video playback
+python-vlc==3.0.18121
+
+# Machine learning frameworks (choose one or both based on model_type in config)
+# TensorFlow (for model_type='tensorflow')
+tensorflow==2.10.1
+
+# PyTorch (for model_type='pytorch')
+torch==1.13.1
+torchvision==0.14.1
+
+# Visualization (for debugging/development)
+matplotlib==3.6.2
+
+scikit-learn
+
+# Note: Standard library modules used (no install needed):
+# - configparser
+# - threading
+# - datetime
+# - glob
+# - os
+# - sys
+# - time
