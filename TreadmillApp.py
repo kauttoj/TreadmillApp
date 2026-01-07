@@ -5,6 +5,7 @@ import numpy as np
 import threading
 import time
 import datetime
+from PIL import Image
 
 import sys
 import configparser
@@ -17,7 +18,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from skimage.registration import phase_cross_correlation
 
-config_data = configparser.ConfigParser()
+config_data = configparser.ConfigParser(allow_no_value=True)
 CONFIG_FILE = "config_params.cfg"
 assert os.path.exists(CONFIG_FILE)>0,"Config file with name config_params.cfg not found in program path!"
 config_data.read(CONFIG_FILE,encoding="UTF-8")
@@ -26,7 +27,14 @@ os.add_dll_directory(config_data.get("paths","vlc_path"))
 import vlc
 
 os.environ["CUDA_VISIBLE_DEVICES"]="-1"  # use CPU
-from tensorflow.keras.models import load_model
+
+if config_data.get("main","model_type") == 'tensorflow':
+    from tensorflow.keras.models import load_model
+elif config_data.get("main","model_type") == 'pytorch':
+    import torch
+    from pytorch_digits_model import Network
+else:
+    raise(AssertionError('Bad model type!'))
 
 def set_value(entry,default):
     global config_data
@@ -67,7 +75,7 @@ white = QColor(255, 255, 255)
 
 # FOR DEBUGGING AND DEVELOPMENT
 import matplotlib.pyplot as plt
-WEBCAM_VIDEO = '' # r"C:\Work\TreadmillApp\mydata\WIN_20210713_20_33_27_Pro.mp4"
+WEBCAM_VIDEO = "" # r"C:\Users\janne\Desktop\TreadmillApp\mydata\WIN_20210713_20_33_27_Pro.mp4"
 DEBUG_SPEED_OVERRIDE = None #13
 LOAD_MODEL = True # set false for faster loading in debugging
 
@@ -138,7 +146,7 @@ class VideoWindow(QMainWindow):
         #self.stopbutton.clicked.connect(self.stop)
 
         self.timetxt = QLabel('0', self)
-        self.timetxt.setFont(QFont('Times',12))
+        self.timetxt.setFont(QFont('Times',11))
         self.timetxt.setAlignment(Qt.AlignCenter)
         self.hbuttonbox.addWidget(self.timetxt)
 
@@ -157,12 +165,12 @@ class VideoWindow(QMainWindow):
         self.timer.start()
 
         self.timetxt_remain = QLabel('0', self)
-        self.timetxt_remain.setFont(QFont('Times',12))
+        self.timetxt_remain.setFont(QFont('Times',11))
         self.timetxt_remain.setAlignment(Qt.AlignCenter)
         self.hbuttonbox.addWidget(self.timetxt_remain)
 
         self.speedtxt = QLabel('0', self)
-        self.speedtxt.setFont(QFont('Times',14))
+        self.speedtxt.setFont(QFont('Times',12))
         self.speedtxt.setAlignment(Qt.AlignCenter)
         self.hbuttonbox.addWidget(self.speedtxt)
 
@@ -220,12 +228,15 @@ class VideoWindow(QMainWindow):
         #self.stopbutton.move(120, x[3] - 35)
         self.timetxt.move(105,x[3] - 35)
         self.timetxt.setFixedWidth(100)
+        
         self.positionslider.move(200, x[3] - 35)
-        self.timetxt_remain.move(x[2]-250, x[3] - 35)
-        self.timetxt_remain.setFixedWidth(100)
-        self.speedtxt.move(x[2] - 160, x[3] - 35)
-        self.speedtxt.setFixedWidth(150)
-        self.positionslider.setFixedWidth(x[2]-450)
+        self.positionslider.setFixedWidth(x[2]-515)
+        
+        self.timetxt_remain.move(x[2]-310, x[3] - 35)
+        self.timetxt_remain.setFixedWidth(120)
+        self.speedtxt.move(x[2] - 190, x[3] - 35)
+        self.speedtxt.setFixedWidth(180)
+        
         QMainWindow.resizeEvent(self, event)
 
     def set_position(self):
@@ -718,7 +729,7 @@ class MainWindow(QDialog):
             self.camera_thread.daemon = True
             self.camera_thread.start()
         else:
-            current_running_speed=self.defaultspeed
+            current_running_speed=DEFAULT_SPEED # self.defaultspeed
             self.lcdNumber.display("{1:,.{0}f}".format(self.precision, current_running_speed))
             self.frames_per_sec.setText("-")
 
@@ -768,8 +779,7 @@ class MainWindow(QDialog):
             x1 = int(x1 * self.frame_scaling["width"])
             y1 = int(y1 * self.frame_scaling["height"])
             x2 = int(x2 * self.frame_scaling["width"])
-            y2 = int(y2 * self.frame_scaling["height"])
-            
+            y2 = int(y2 * self.frame_scaling["height"])            
 
             return x1, y1, x2, y2
 
@@ -950,7 +960,7 @@ class MainWindow(QDialog):
 
         # update config file
         count = 0
-        old_files = {k:config_data["files"].get(k).split(":") for k in list(config_data["files"])}
+        old_files = {k:config_data["files"].get(k).split("|") for k in list(config_data["files"])} # separator is pipe |
         for k,old_file in old_files.items():
             for f in files:
                 if int(old_file[1])==f["size"]:
@@ -1053,9 +1063,9 @@ class MainWindow(QDialog):
 
     def update_filedata(self):
         if self.chosen_file is not None:
-            old_files = {k:config_data["files"].get(k).split(":") for k in list(config_data["files"])}
+            old_files = {k:config_data["files"].get(k).split("|") for k in list(config_data["files"])}
             found=False
-            new_data_entry = ":".join([
+            new_data_entry = "|".join([
                 self.chosen_file["filename"],
                 str(self.chosen_file["size"]),
                 str(self.chosen_file["rate"]),
@@ -1245,12 +1255,16 @@ def predict_digit(frame,ROI,use_prev_box,use_detection,DEBUG=False):
     if len(frame_digits) != ROI[-1]:
         print("Failed to find individual digits (found %i digits our of required %i)!" % (len(frame_digits),ROI[-1]))
         return None,None,None,None
-    raw_frame_digits = [resize_image(x, IMG_SIZE) for x in frame_digits]
-    frame_digits = np.stack(raw_frame_digits, axis=0).astype(np.float32) / 255.0
-    digits = predictor_model.predict(frame_digits)
-    prob = np.prod(np.max(digits, 1))
-    digits = np.argmax(digits, 1)
-    digits[digits == 10] = -1
+    if USE_PIL_IMAGE:
+        frame_digits = [Image.fromarray(x.astype('uint8'), 'RGB') for x in frame_digits]
+    else:
+        raw_frame_digits = [resize_image(x, IMG_SIZE) for x in frame_digits]
+        frame_digits = np.stack(raw_frame_digits, axis=0).astype(np.float32) / 255.0
+    digits,prob = predictor_model.predict(frame_digits)
+    prob = np.prod(prob)
+    #digits = np.argmax(digits, 1)
+    #digits[digits == 10] = -1
+
     return digits,prob,rectangles,frame_digits
 
 if __name__ == "__main__":
@@ -1259,15 +1273,27 @@ if __name__ == "__main__":
         ui = VideoWindow('',4.0)
         sys.exit(app.exec_())
     else:
+        USE_PIL_IMAGE = False
         if LOAD_MODEL:
             # load and test predictor model before starting the app
             print("Loading recognition model... ", end="")
-            predictor_model = load_model(DIGIT_MODEL)
-            IMG_SIZE = predictor_model.layers[1].input_shape[1:3]
+            if config_data.get("main", "model_type") == 'tensorflow':
+                predictor_model = load_model(DIGIT_MODEL)
+                IMG_SIZE = predictor_model.layers[1].input_shape[1:3]
+                print("making dummy prediction to initialize predictor... ", end='')
+                predictor_model.predict(np.random.rand(10, IMG_SIZE[0], IMG_SIZE[1], 3))
+            elif config_data.get("main", "model_type") == 'pytorch':
+                USE_PIL_IMAGE = True
+                device = torch.device('cpu')
+                predictor_model = torch.load(DIGIT_MODEL, map_location=device)
+                predictor_model.set_device(device)
+                IMG_SIZE = [42,61]
+                print("making dummy prediction to initialize predictor... ", end='')
+                width, height = 46, 68
+                array = np.random.rand(height, width, 3) * 255  # Random values between 0 and 255
+                img = Image.fromarray(array.astype('uint8'), 'RGB')
+                output,prob = predictor_model.predict([img])
             assert IMG_SIZE[0]>30 and IMG_SIZE[1]>30,"BAD IMAGE SIZE!"
-            print("done")
-            print("making dummy prediction to initialize predictor... ",end='')
-            predictor_model.predict(np.random.rand(10,IMG_SIZE[0],IMG_SIZE[1],3))
             print("done")
 
         print("Starting application")
@@ -1275,3 +1301,5 @@ if __name__ == "__main__":
         ui = MainWindow()
         #QtCore.QTimer.singleShot(0,ui.close)
         sys.exit(app.exec_())
+
+
