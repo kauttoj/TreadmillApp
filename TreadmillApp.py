@@ -23,6 +23,18 @@ CONFIG_FILE = "config_params.cfg"
 assert os.path.exists(CONFIG_FILE)>0,"Config file with name config_params.cfg not found in program path!"
 config_data.read(CONFIG_FILE,encoding="UTF-8")
 
+# Ensure [template] section exists for template-based auto-detection
+if 'template' not in config_data:
+    config_data.add_section('template')
+    config_data['template']['active_template'] = 'default'
+    config_data['template']['template_directory'] = 'templates/'
+    config_data['template']['auto_calibrate_on_startup'] = 'true'
+    config_data['template']['confidence_threshold'] = '0.70'
+
+    with open(CONFIG_FILE, 'w', encoding="UTF-8") as configfile:
+        config_data.write(configfile)
+    print("Added [template] section to config")
+
 os.add_dll_directory(config_data.get("paths","vlc_path"))
 import vlc
 
@@ -98,6 +110,1094 @@ def register_image(image,offset_image):
     #if abs(shift[0])+abs(shift[1])>0:
     #    print('fixed motion for x=%i, y=%i' % (shift[0],shift[1]))
     return offset_image
+
+
+# ===== TEMPLATE-BASED AUTO-DETECTION SYSTEM =====
+
+class TemplateManager:
+    """
+    Manages template files (.npz format) for ROI auto-detection.
+    Templates store: image, mask, polygon, ROI coords, digit count, etc.
+    """
+
+    def __init__(self, template_dir='templates'):
+        """
+        Initialize template manager.
+
+        Args:
+            template_dir: Directory path for template storage (default: 'templates/')
+        """
+        self.template_dir = template_dir
+        self.current_template = None
+
+        # Create directory if it doesn't exist
+        if not os.path.exists(self.template_dir):
+            try:
+                os.makedirs(self.template_dir)
+                print(f"Created template directory: {self.template_dir}")
+            except Exception as e:
+                print(f"Warning: Could not create template directory: {e}")
+
+    def list_templates(self):
+        """
+        List all available template names.
+
+        Returns:
+            List of template names (without .npz extension)
+        """
+        try:
+            if not os.path.exists(self.template_dir):
+                return []
+
+            files = glob.glob(os.path.join(self.template_dir, "*.npz"))
+            names = [os.path.splitext(os.path.basename(f))[0] for f in files]
+            return sorted(names)
+        except Exception as e:
+            print(f"Error listing templates: {e}")
+            return []
+
+    def template_exists(self, name):
+        """
+        Check if a template exists.
+
+        Args:
+            name: Template name (without .npz extension)
+
+        Returns:
+            Boolean indicating if template exists
+        """
+        path = os.path.join(self.template_dir, f"{name}.npz")
+        return os.path.exists(path)
+
+    def load_template(self, name):
+        """
+        Load a template from disk.
+
+        Args:
+            name: Template name (without .npz extension)
+
+        Returns:
+            Dictionary with template data, or None if failed
+        """
+        path = os.path.join(self.template_dir, f"{name}.npz")
+
+        try:
+            if not os.path.exists(path):
+                print(f"Template not found: {name}")
+                return None
+
+            # Load numpy archive
+            data = np.load(path, allow_pickle=True)
+
+            # Required keys
+            required_keys = ['template_image', 'panel_mask', 'panel_polygon',
+                           'roi_box', 'digit_count', 'zoom_level',
+                           'timestamp', 'camera_source']
+
+            # Validate all keys present
+            for key in required_keys:
+                if key not in data:
+                    print(f"Template '{name}' missing required key: {key}")
+                    return None
+
+            # Convert to regular dict
+            template_dict = {key: data[key] for key in required_keys}
+
+            # Store as current template
+            self.current_template = template_dict
+
+            print(f"Loaded template: {name}")
+            return template_dict
+
+        except Exception as e:
+            print(f"Error loading template '{name}': {e}")
+            return None
+
+    def save_template(self, name, template_data):
+        """
+        Save a template to disk.
+
+        Args:
+            name: Template name (without .npz extension)
+            template_data: Dictionary with template data
+
+        Returns:
+            Boolean indicating success
+        """
+        try:
+            # Sanitize filename (remove special characters)
+            name = ''.join(c for c in name if c.isalnum() or c in ('_', '-'))
+            name = name[:30]  # Max 30 characters
+
+            if not name:
+                print("Invalid template name")
+                return False
+
+            # Required keys
+            required_keys = ['template_image', 'panel_mask', 'panel_polygon',
+                           'roi_box', 'digit_count', 'zoom_level',
+                           'timestamp', 'camera_source']
+
+            # Validate all keys present
+            for key in required_keys:
+                if key not in template_data:
+                    print(f"Template data missing required key: {key}")
+                    return False
+
+            # Ensure directory exists
+            if not os.path.exists(self.template_dir):
+                os.makedirs(self.template_dir)
+
+            # Save as compressed npz file
+            path = os.path.join(self.template_dir, f"{name}.npz")
+            np.savez_compressed(path, **template_data)
+
+            # Update current template
+            self.current_template = template_data
+
+            print(f"Saved template: {name} to {path}")
+            return True
+
+        except Exception as e:
+            print(f"Error saving template '{name}': {e}")
+            return False
+
+    def delete_template(self, name):
+        """
+        Delete a template from disk.
+
+        Args:
+            name: Template name (without .npz extension)
+
+        Returns:
+            Boolean indicating success
+        """
+        path = os.path.join(self.template_dir, f"{name}.npz")
+
+        try:
+            if not os.path.exists(path):
+                print(f"Template not found: {name}")
+                return False
+
+            os.remove(path)
+            print(f"Deleted template: {name}")
+
+            # Clear current template if it was deleted
+            if self.current_template is not None:
+                self.current_template = None
+
+            return True
+
+        except Exception as e:
+            print(f"Error deleting template '{name}': {e}")
+            return False
+
+    def get_current_template(self):
+        """
+        Get the currently loaded template.
+
+        Returns:
+            Template dictionary or None
+        """
+        return self.current_template
+
+
+class ROIMatcher:
+    """
+    Matches template to live frame using ORB features and homography transformation.
+    Returns ROI coordinates and confidence score.
+    """
+
+    def __init__(self):
+        """Initialize feature detector, matcher, and preprocessor."""
+        # ORB detector with more features for robustness
+        self.detector = cv2.ORB_create(
+            nfeatures=2000,     # Detect up to 2000 features
+            scaleFactor=1.2,    # Pyramid scale factor
+            nlevels=8           # Pyramid levels for scale invariance
+        )
+
+        # FLANN matcher for fast approximate matching (LSH for binary descriptors)
+        FLANN_INDEX_LSH = 6
+        index_params = dict(
+            algorithm=FLANN_INDEX_LSH,
+            table_number=6,     # 12 tables
+            key_size=12,        # 20 bits per key
+            multi_probe_level=1 # Check 2 neighboring buckets
+        )
+        search_params = dict(checks=50)  # Number of tree checks
+        self.matcher = cv2.FlannBasedMatcher(index_params, search_params)
+
+        # CLAHE for contrast enhancement (normalize lighting differences)
+        self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+    def preprocess_image(self, image):
+        """
+        Preprocess image for feature detection.
+        Converts to grayscale and applies CLAHE contrast enhancement.
+
+        Args:
+            image: Color or grayscale image (numpy array)
+
+        Returns:
+            Preprocessed grayscale image
+        """
+        # Convert to grayscale if needed
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image
+
+        # Apply CLAHE to normalize lighting
+        enhanced = self.clahe.apply(gray)
+
+        return enhanced
+
+    def validate_homography(self, H):
+        """
+        Validate that homography transformation is reasonable.
+        Rejects extreme scaling, rotation, or perspective distortion.
+
+        Args:
+            H: 3x3 homography matrix
+
+        Returns:
+            Boolean indicating if homography is valid
+        """
+        if H is None:
+            return False
+
+        try:
+            # Extract scale factors from homography
+            sx = np.sqrt(H[0, 0]**2 + H[1, 0]**2)
+            sy = np.sqrt(H[0, 1]**2 + H[1, 1]**2)
+
+            # Check scale (reject if object appears more than 2x larger/smaller)
+            if sx < 0.5 or sx > 2.0 or sy < 0.5 or sy > 2.0:
+                print(f"Homography rejected: excessive scale sx={sx:.2f}, sy={sy:.2f}")
+                return False
+
+            # Extract rotation angle
+            angle = np.arctan2(H[1, 0], H[0, 0]) * 180 / np.pi
+
+            # Check rotation (reject if > 15 degrees)
+            if abs(angle) > 15:
+                print(f"Homography rejected: excessive rotation angle={angle:.1f}°")
+                return False
+
+            # Check perspective distortion (H[2,0] and H[2,1] should be small)
+            if abs(H[2, 0]) > 0.001 or abs(H[2, 1]) > 0.001:
+                print(f"Homography rejected: excessive perspective H[2,0]={H[2,0]:.4f}, H[2,1]={H[2,1]:.4f}")
+                return False
+
+            return True
+
+        except Exception as e:
+            print(f"Error validating homography: {e}")
+            return False
+
+    def transform_roi(self, template_roi, H):
+        """
+        Transform template ROI coordinates to live frame coordinates using homography.
+
+        Args:
+            template_roi: [x1, y1, x2, y2] in template coordinates
+            H: 3x3 homography matrix
+
+        Returns:
+            [x1, y1, x2, y2] in live frame coordinates (bounding box)
+        """
+        x1, y1, x2, y2 = template_roi
+
+        # Define 4 corners of ROI box
+        corners = np.array([
+            [x1, y1],  # Top-left
+            [x2, y1],  # Top-right
+            [x2, y2],  # Bottom-right
+            [x1, y2]   # Bottom-left
+        ], dtype=np.float32)
+
+        # Reshape for perspectiveTransform (needs shape [N, 1, 2])
+        corners = corners.reshape(-1, 1, 2)
+
+        # Apply homography transformation
+        transformed = cv2.perspectiveTransform(corners, H)
+
+        # Get bounding box of transformed corners
+        x_coords = transformed[:, 0, 0]
+        y_coords = transformed[:, 0, 1]
+
+        roi_live = [
+            int(np.min(x_coords)),  # x1
+            int(np.min(y_coords)),  # y1
+            int(np.max(x_coords)),  # x2
+            int(np.max(y_coords))   # y2
+        ]
+
+        return roi_live
+
+    def validate_roi(self, roi, frame_shape):
+        """
+        Validate that ROI is within frame bounds and has reasonable size.
+
+        Args:
+            roi: [x1, y1, x2, y2]
+            frame_shape: (height, width) tuple
+
+        Returns:
+            Boolean indicating if ROI is valid
+        """
+        x1, y1, x2, y2 = roi
+        height, width = frame_shape[:2]
+
+        # Check bounds
+        if x1 < 0 or y1 < 0 or x2 > width or y2 > height:
+            print(f"ROI rejected: out of bounds ({x1},{y1},{x2},{y2}) for frame {width}x{height}")
+            return False
+
+        # Check minimum size
+        roi_width = x2 - x1
+        roi_height = y2 - y1
+
+        if roi_width < 40 or roi_height < 20:
+            print(f"ROI rejected: too small {roi_width}x{roi_height} (min 40x20)")
+            return False
+
+        # Check maximum size (shouldn't be more than half the frame)
+        if roi_width > width * 0.5 or roi_height > height * 0.5:
+            print(f"ROI rejected: too large {roi_width}x{roi_height}")
+            return False
+
+        # Check aspect ratio (digits are typically wider than tall, 1:1 to 10:1)
+        aspect_ratio = roi_width / roi_height
+        if aspect_ratio < 1.0 or aspect_ratio > 10.0:
+            print(f"ROI rejected: unusual aspect ratio {aspect_ratio:.2f}")
+            return False
+
+        return True
+
+    def match_template(self, live_frame, template_data, threshold=0.70):
+        """
+        Match template to live frame and compute ROI transformation.
+        Main algorithm using ORB features, FLANN matching, and homography.
+
+        Args:
+            live_frame: Current webcam frame (H, W, 3) BGR
+            template_data: Dictionary with template info
+            threshold: Minimum confidence threshold (0-1)
+
+        Returns:
+            Tuple: ([x1, y1, x2, y2], confidence) or (None, confidence)
+        """
+        try:
+            # Step 1: Preprocess images
+            template_gray = self.preprocess_image(template_data['template_image'])
+            live_gray = self.preprocess_image(live_frame)
+
+            # Step 2: Detect features
+            # Template: only detect in masked panel region
+            kp_template, desc_template = self.detector.detectAndCompute(
+                template_gray,
+                mask=template_data['panel_mask']  # Only detect on panel
+            )
+
+            # Live frame: detect everywhere
+            kp_live, desc_live = self.detector.detectAndCompute(live_gray, mask=None)
+
+            # Validate sufficient features found
+            if desc_template is None or desc_live is None:
+                print("Feature detection failed: no descriptors found")
+                return None, 0.0
+
+            if len(kp_template) < 10:
+                print(f"Too few template features: {len(kp_template)} (need 10+)")
+                return None, 0.0
+
+            if len(kp_live) < 10:
+                print(f"Too few live frame features: {len(kp_live)} (need 10+)")
+                return None, 0.0
+
+            # Step 3: Match features using FLANN
+            matches = self.matcher.knnMatch(desc_template, desc_live, k=2)
+
+            # Apply Lowe's ratio test to filter bad matches
+            good_matches = []
+            for match_pair in matches:
+                if len(match_pair) == 2:
+                    m, n = match_pair
+                    if m.distance < 0.75 * n.distance:  # Ratio threshold
+                        good_matches.append(m)
+
+            if len(good_matches) < 15:
+                print(f"Too few good matches: {len(good_matches)} (need 15+)")
+                return None, 0.0
+
+            # Step 4: Compute homography
+            # Extract point coordinates from matches
+            src_pts = np.float32([kp_template[m.queryIdx].pt for m in good_matches])
+            dst_pts = np.float32([kp_live[m.trainIdx].pt for m in good_matches])
+
+            # Reshape for findHomography
+            src_pts = src_pts.reshape(-1, 1, 2)
+            dst_pts = dst_pts.reshape(-1, 1, 2)
+
+            # Compute homography with RANSAC
+            H, mask_ransac = cv2.findHomography(
+                src_pts,
+                dst_pts,
+                method=cv2.RANSAC,
+                ransacReprojThreshold=5.0  # Max pixel error for inliers
+            )
+
+            if H is None:
+                print("Homography computation failed")
+                return None, 0.0
+
+            # Step 5: Validate homography
+            if not self.validate_homography(H):
+                return None, 0.0
+
+            # Calculate confidence based on inliers
+            inliers = np.sum(mask_ransac)
+            confidence = float(inliers) / len(good_matches)
+
+            if confidence < threshold:
+                print(f"Confidence too low: {confidence:.1%} < {threshold:.1%}")
+                return None, confidence
+
+            # Step 6: Transform ROI coordinates
+            roi_live = self.transform_roi(template_data['roi_box'], H)
+
+            # Step 7: Validate transformed ROI
+            if not self.validate_roi(roi_live, live_frame.shape):
+                return None, confidence
+
+            # Success!
+            print(f"Template matched! Confidence: {confidence:.1%}, ROI: {roi_live}")
+            return roi_live, confidence
+
+        except Exception as e:
+            print(f"Error in template matching: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, 0.0
+
+
+class TemplateCaptureDialog(QDialog):
+    """
+    Interactive dialog for creating ROI templates.
+    3-state workflow: DRAW_PANEL → DRAW_ROI → PREVIEW
+    User draws panel boundary, then ROI box, then saves template.
+    """
+
+    # State constants
+    STATE_DRAW_PANEL = 0
+    STATE_DRAW_ROI = 1
+    STATE_PREVIEW = 2
+
+    def __init__(self, parent, captured_frame, camera_source, zoom_level):
+        """
+        Initialize template capture dialog.
+
+        Args:
+            parent: Parent widget
+            captured_frame: Frozen webcam frame (BGR numpy array)
+            camera_source: Camera device ID (0, 1, etc.)
+            zoom_level: Current zoom level (1-3)
+        """
+        super().__init__(parent)
+
+        self.captured_frame = captured_frame.copy()  # Store frozen frame
+        self.camera_source = camera_source
+        self.zoom_level = zoom_level
+
+        # State machine
+        self.state = self.STATE_DRAW_PANEL
+        self.drawing_mode = 'polygon'  # 'polygon' or 'rectangle'
+
+        # Drawing data
+        self.panel_points = []  # List of (x, y) for polygon
+        self.roi_corners = []   # List of 2 (x, y) for ROI rectangle
+        self.digit_count = 3    # Default digit count
+        self.mouse_pos = None   # Current mouse position for preview
+
+        # Template data (filled when saving)
+        self.template_data = None
+        self.template_name = None
+
+        # Setup UI
+        self.setWindowTitle("Create ROI Template")
+        self.setModal(True)
+        self.resize(900, 750)
+
+        self.setup_ui()
+        self.update_display()
+
+    def setup_ui(self):
+        """Create and layout all UI widgets."""
+        # Main layout
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+
+        # Instructions label
+        self.instructions_label = QLabel()
+        self.instructions_label.setWordWrap(True)
+        self.instructions_label.setStyleSheet("font-weight: bold; font-size: 12px; padding: 5px;")
+        self.update_instructions()
+        main_layout.addWidget(self.instructions_label)
+
+        # Image display label
+        self.image_label = QLabel()
+        self.image_label.setMinimumSize(640, 480)
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setStyleSheet("background-color: black; border: 2px solid #ccc;")
+        self.image_label.setMouseTracking(True)
+        self.image_label.mousePressEvent = self.handle_mouse_press
+        self.image_label.mouseMoveEvent = self.handle_mouse_move
+        main_layout.addWidget(self.image_label, stretch=1)
+
+        # Controls layout
+        controls_layout = QHBoxLayout()
+
+        # Drawing mode combo (only visible in STATE_DRAW_PANEL)
+        self.mode_label = QLabel("Mode:")
+        controls_layout.addWidget(self.mode_label)
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Polygon", "Rectangle"])
+        self.mode_combo.currentIndexChanged.connect(self.on_mode_changed)
+        controls_layout.addWidget(self.mode_combo)
+
+        # Clear button
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.clicked.connect(self.on_clear_clicked)
+        controls_layout.addWidget(self.clear_btn)
+
+        controls_layout.addStretch()
+
+        # Digit count spinner (only visible in STATE_DRAW_ROI)
+        self.digit_label = QLabel("Digits:")
+        self.digit_label.setVisible(False)
+        controls_layout.addWidget(self.digit_label)
+
+        self.digit_spin = QSpinBox()
+        self.digit_spin.setRange(1, 5)
+        self.digit_spin.setValue(3)
+        self.digit_spin.valueChanged.connect(self.on_digit_count_changed)
+        self.digit_spin.setVisible(False)
+        controls_layout.addWidget(self.digit_spin)
+
+        controls_layout.addStretch()
+
+        # Navigation buttons
+        self.back_btn = QPushButton("Back")
+        self.back_btn.clicked.connect(self.on_back_clicked)
+        self.back_btn.setVisible(False)
+        controls_layout.addWidget(self.back_btn)
+
+        self.next_btn = QPushButton("Next")
+        self.next_btn.clicked.connect(self.on_next_clicked)
+        self.next_btn.setEnabled(False)
+        controls_layout.addWidget(self.next_btn)
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+        controls_layout.addWidget(self.cancel_btn)
+
+        main_layout.addLayout(controls_layout)
+
+        # Template name input (only visible in STATE_PREVIEW)
+        name_layout = QHBoxLayout()
+        self.name_label = QLabel("Template name:")
+        self.name_label.setVisible(False)
+        name_layout.addWidget(self.name_label)
+
+        self.name_input = QLineEdit()
+        self.name_input.setText(f"template_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        self.name_input.setMaxLength(30)
+        self.name_input.setVisible(False)
+        name_layout.addWidget(self.name_input, stretch=1)
+
+        main_layout.addLayout(name_layout)
+
+        # Status label
+        self.status_label = QLabel()
+        self.status_label.setStyleSheet("color: #666; font-size: 11px; padding: 3px;")
+        main_layout.addWidget(self.status_label)
+
+        self.setLayout(main_layout)
+
+    def update_instructions(self):
+        """Update instruction text based on current state."""
+        if self.state == self.STATE_DRAW_PANEL:
+            if self.drawing_mode == 'polygon':
+                text = "Step 1 of 3: Draw panel boundary - Click to add points (4+ required), then click Next"
+            else:
+                text = "Step 1 of 3: Draw panel boundary - Click two corners to define rectangle"
+        elif self.state == self.STATE_DRAW_ROI:
+            text = "Step 2 of 3: Draw ROI box - Click two corners around the digit display"
+        else:  # STATE_PREVIEW
+            text = "Step 3 of 3: Review and save - Enter template name and click Save"
+
+        self.instructions_label.setText(text)
+
+    def handle_mouse_press(self, event):
+        """Handle mouse click events on image label."""
+        if event.button() != Qt.LeftButton:
+            return
+
+        # Convert widget coords to image coords
+        img_x, img_y = self.widget_to_image_coords(event.pos())
+
+        if img_x is None:
+            return
+
+        if self.state == self.STATE_DRAW_PANEL:
+            if self.drawing_mode == 'polygon':
+                # Add point to polygon
+                self.panel_points.append((img_x, img_y))
+                self.update_display()
+                self.validate_and_update_buttons()
+
+            elif self.drawing_mode == 'rectangle':
+                # Add corner (max 2)
+                if len(self.panel_points) < 2:
+                    self.panel_points.append((img_x, img_y))
+                    self.update_display()
+                    self.validate_and_update_buttons()
+
+                    if len(self.panel_points) == 2:
+                        # Auto-validate rectangle
+                        if self.validate_panel_boundary():
+                            self.status_label.setText("Rectangle complete - click Next")
+                            self.status_label.setStyleSheet("color: green;")
+
+        elif self.state == self.STATE_DRAW_ROI:
+            # Add ROI corner (max 2)
+            if len(self.roi_corners) < 2:
+                self.roi_corners.append((img_x, img_y))
+                self.update_display()
+                self.validate_and_update_buttons()
+
+                if len(self.roi_corners) == 2:
+                    # Auto-validate ROI
+                    if self.validate_roi_box():
+                        self.status_label.setText("ROI complete - click Next")
+                        self.status_label.setStyleSheet("color: green;")
+
+    def handle_mouse_move(self, event):
+        """Handle mouse move events for preview drawing."""
+        # Convert widget coords to image coords
+        img_x, img_y = self.widget_to_image_coords(event.pos())
+
+        if img_x is None:
+            return
+
+        self.mouse_pos = (img_x, img_y)
+        self.update_display()
+
+    def widget_to_image_coords(self, pos):
+        """
+        Convert widget click coordinates to image coordinates.
+        Handles scaling and centering of displayed image.
+
+        Args:
+            pos: QPoint from mouse event
+
+        Returns:
+            Tuple (img_x, img_y) or (None, None) if outside image
+        """
+        pixmap = self.image_label.pixmap()
+        if pixmap is None:
+            return None, None
+
+        # Get offsets (image may be centered with padding)
+        label_width = self.image_label.width()
+        label_height = self.image_label.height()
+        pixmap_width = pixmap.width()
+        pixmap_height = pixmap.height()
+
+        x_offset = (label_width - pixmap_width) // 2
+        y_offset = (label_height - pixmap_height) // 2
+
+        # Widget coordinates
+        widget_x = pos.x()
+        widget_y = pos.y()
+
+        # Check if click is within pixmap bounds
+        if (widget_x < x_offset or widget_x >= x_offset + pixmap_width or
+            widget_y < y_offset or widget_y >= y_offset + pixmap_height):
+            return None, None
+
+        # Convert to pixmap coordinates
+        pixmap_x = widget_x - x_offset
+        pixmap_y = widget_y - y_offset
+
+        # Scale to original image coordinates
+        img_height, img_width = self.captured_frame.shape[:2]
+        scale_x = img_width / pixmap_width
+        scale_y = img_height / pixmap_height
+
+        img_x = int(pixmap_x * scale_x)
+        img_y = int(pixmap_y * scale_y)
+
+        # Clamp to image bounds
+        img_x = max(0, min(img_x, img_width - 1))
+        img_y = max(0, min(img_y, img_height - 1))
+
+        return img_x, img_y
+
+    def update_display(self):
+        """Redraw frame with current annotations."""
+        # Make a copy for drawing
+        display_img = self.captured_frame.copy()
+
+        if self.state == self.STATE_DRAW_PANEL:
+            self.draw_panel_state(display_img)
+        elif self.state == self.STATE_DRAW_ROI:
+            self.draw_roi_state(display_img)
+        elif self.state == self.STATE_PREVIEW:
+            self.draw_preview_state(display_img)
+
+        # Convert BGR to RGB for Qt
+        display_img = cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB)
+
+        # Convert to QPixmap
+        height, width = display_img.shape[:2]
+        bytes_per_line = 3 * width
+        q_img = QImage(display_img.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(q_img)
+
+        # Scale to fit label while maintaining aspect ratio
+        scaled_pixmap = pixmap.scaled(
+            self.image_label.size(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        )
+
+        self.image_label.setPixmap(scaled_pixmap)
+
+    def draw_panel_state(self, img):
+        """Draw panel boundary points and lines."""
+        if not self.panel_points:
+            return
+
+        # Draw points
+        for point in self.panel_points:
+            cv2.circle(img, point, 5, (0, 255, 0), -1)
+
+        # Draw lines connecting points
+        if len(self.panel_points) > 1:
+            for i in range(len(self.panel_points) - 1):
+                cv2.line(img, self.panel_points[i], self.panel_points[i+1], (0, 255, 0), 2)
+
+            # Close polygon (connect last to first)
+            if self.drawing_mode == 'polygon' and len(self.panel_points) > 2:
+                cv2.line(img, self.panel_points[-1], self.panel_points[0], (0, 255, 0), 2)
+            elif self.drawing_mode == 'rectangle' and len(self.panel_points) == 2:
+                # Draw complete rectangle
+                x1, y1 = self.panel_points[0]
+                x2, y2 = self.panel_points[1]
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+        # Draw preview line from last point to mouse
+        if self.mouse_pos and len(self.panel_points) > 0:
+            if self.drawing_mode == 'polygon':
+                cv2.line(img, self.panel_points[-1], self.mouse_pos, (0, 255, 0), 1)
+            elif self.drawing_mode == 'rectangle' and len(self.panel_points) == 1:
+                # Preview rectangle
+                x1, y1 = self.panel_points[0]
+                x2, y2 = self.mouse_pos
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 1)
+
+    def draw_roi_state(self, img):
+        """Draw panel overlay and ROI box."""
+        # Draw panel mask overlay (semi-transparent)
+        mask = self.create_panel_mask()
+        overlay = img.copy()
+        overlay[mask > 0] = [0, 255, 0]  # Green
+        cv2.addWeighted(overlay, 0.3, img, 0.7, 0, img)
+
+        # Draw panel boundary
+        if self.drawing_mode == 'polygon':
+            pts = np.array(self.panel_points, dtype=np.int32)
+            cv2.polylines(img, [pts], True, (0, 255, 0), 2)
+        else:  # rectangle
+            x1, y1 = self.panel_points[0]
+            x2, y2 = self.panel_points[1]
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+        # Draw ROI corners and box
+        if self.roi_corners:
+            for point in self.roi_corners:
+                cv2.circle(img, point, 5, (0, 0, 255), -1)
+
+            if len(self.roi_corners) == 2:
+                x1, y1 = self.roi_corners[0]
+                x2, y2 = self.roi_corners[1]
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 3)
+
+                # Draw digit divisions
+                digit_count = self.digit_spin.value()
+                x1_norm = min(x1, x2)
+                x2_norm = max(x1, x2)
+                y1_norm = min(y1, y2)
+                y2_norm = max(y1, y2)
+
+                roi_width = x2_norm - x1_norm
+                digit_width = roi_width / digit_count
+
+                for i in range(1, digit_count):
+                    x_div = int(x1_norm + i * digit_width)
+                    cv2.line(img, (x_div, y1_norm), (x_div, y2_norm), (255, 255, 0), 1)
+
+            elif self.mouse_pos:
+                # Preview ROI box
+                x1, y1 = self.roi_corners[0]
+                x2, y2 = self.mouse_pos
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 1)
+
+    def draw_preview_state(self, img):
+        """Draw final template preview with all annotations."""
+        # Same as ROI state
+        self.draw_roi_state(img)
+
+        # Add "PREVIEW" text
+        cv2.putText(img, "PREVIEW", (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+
+    def create_panel_mask(self):
+        """Generate binary mask from panel points."""
+        height, width = self.captured_frame.shape[:2]
+        mask = np.zeros((height, width), dtype=np.uint8)
+
+        if self.drawing_mode == 'polygon':
+            pts = np.array(self.panel_points, dtype=np.int32)
+            cv2.fillPoly(mask, [pts], 255)
+        elif self.drawing_mode == 'rectangle' and len(self.panel_points) == 2:
+            x1, y1 = self.panel_points[0]
+            x2, y2 = self.panel_points[1]
+            x1, x2 = min(x1, x2), max(x1, x2)
+            y1, y2 = min(y1, y2), max(y1, y2)
+            mask[y1:y2, x1:x2] = 255
+
+        return mask
+
+    def validate_panel_boundary(self):
+        """Validate panel boundary is acceptable."""
+        if self.drawing_mode == 'polygon':
+            if len(self.panel_points) < 4:
+                self.status_label.setText("Polygon needs at least 4 points")
+                self.status_label.setStyleSheet("color: red;")
+                return False
+        elif self.drawing_mode == 'rectangle':
+            if len(self.panel_points) < 2:
+                self.status_label.setText("Rectangle needs 2 corners")
+                self.status_label.setStyleSheet("color: red;")
+                return False
+
+        # Check area
+        mask = self.create_panel_mask()
+        total_pixels = mask.shape[0] * mask.shape[1]
+        panel_pixels = np.sum(mask > 0)
+        area_ratio = panel_pixels / total_pixels
+
+        if area_ratio < 0.05:
+            self.status_label.setText(f"Panel too small ({area_ratio*100:.1f}% of frame, need >5%)")
+            self.status_label.setStyleSheet("color: red;")
+            return False
+
+        if area_ratio > 0.80:
+            self.status_label.setText(f"Panel too large ({area_ratio*100:.1f}% of frame, need <80%)")
+            self.status_label.setStyleSheet("color: red;")
+            return False
+
+        self.status_label.setText(f"Panel boundary OK ({area_ratio*100:.1f}% of frame)")
+        self.status_label.setStyleSheet("color: green;")
+        return True
+
+    def validate_roi_box(self):
+        """Validate ROI box is acceptable."""
+        if len(self.roi_corners) < 2:
+            self.status_label.setText("ROI needs 2 corners")
+            self.status_label.setStyleSheet("color: red;")
+            return False
+
+        x1, y1 = self.roi_corners[0]
+        x2, y2 = self.roi_corners[1]
+
+        # Normalize coordinates
+        x1, x2 = min(x1, x2), max(x1, x2)
+        y1, y2 = min(y1, y2), max(y1, y2)
+
+        # Check dimensions
+        roi_width = x2 - x1
+        roi_height = y2 - y1
+
+        if roi_width < 40:
+            self.status_label.setText(f"ROI too narrow ({roi_width}px, need >40px)")
+            self.status_label.setStyleSheet("color: red;")
+            return False
+
+        if roi_height < 20:
+            self.status_label.setText(f"ROI too short ({roi_height}px, need >20px)")
+            self.status_label.setStyleSheet("color: red;")
+            return False
+
+        # Check ROI is within panel boundary
+        panel_mask = self.create_panel_mask()
+        roi_corners_check = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+
+        for corner in roi_corners_check:
+            if panel_mask[corner[1], corner[0]] == 0:
+                self.status_label.setText("ROI must be entirely within panel boundary")
+                self.status_label.setStyleSheet("color: red;")
+                return False
+
+        self.status_label.setText(f"ROI OK ({roi_width}x{roi_height}px)")
+        self.status_label.setStyleSheet("color: green;")
+        return True
+
+    def validate_and_update_buttons(self):
+        """Update button states based on current data."""
+        if self.state == self.STATE_DRAW_PANEL:
+            valid = self.validate_panel_boundary()
+            self.next_btn.setEnabled(valid)
+        elif self.state == self.STATE_DRAW_ROI:
+            valid = self.validate_roi_box()
+            self.next_btn.setEnabled(valid)
+        elif self.state == self.STATE_PREVIEW:
+            self.next_btn.setEnabled(True)
+            self.next_btn.setText("Save")
+
+    def on_mode_changed(self, index):
+        """Handle drawing mode change."""
+        self.drawing_mode = 'polygon' if index == 0 else 'rectangle'
+        self.panel_points.clear()
+        self.update_instructions()
+        self.update_display()
+        self.validate_and_update_buttons()
+
+    def on_digit_count_changed(self, value):
+        """Handle digit count change."""
+        self.digit_count = value
+        self.update_display()
+
+    def on_clear_clicked(self):
+        """Clear current drawing."""
+        if self.state == self.STATE_DRAW_PANEL:
+            self.panel_points.clear()
+        elif self.state == self.STATE_DRAW_ROI:
+            self.roi_corners.clear()
+
+        self.update_display()
+        self.validate_and_update_buttons()
+
+    def on_back_clicked(self):
+        """Go to previous state."""
+        if self.state == self.STATE_DRAW_ROI:
+            self.state = self.STATE_DRAW_PANEL
+            self.roi_corners.clear()
+            self.digit_label.setVisible(False)
+            self.digit_spin.setVisible(False)
+            self.back_btn.setVisible(False)
+            self.mode_label.setVisible(True)
+            self.mode_combo.setVisible(True)
+            self.next_btn.setText("Next")
+
+        elif self.state == self.STATE_PREVIEW:
+            self.state = self.STATE_DRAW_ROI
+            self.name_label.setVisible(False)
+            self.name_input.setVisible(False)
+            self.next_btn.setText("Next")
+
+        self.update_instructions()
+        self.update_display()
+        self.validate_and_update_buttons()
+
+    def on_next_clicked(self):
+        """Advance to next state or save."""
+        if self.state == self.STATE_DRAW_PANEL:
+            if not self.validate_panel_boundary():
+                return
+
+            # Advance to ROI drawing
+            self.state = self.STATE_DRAW_ROI
+            self.mode_label.setVisible(False)
+            self.mode_combo.setVisible(False)
+            self.digit_label.setVisible(True)
+            self.digit_spin.setVisible(True)
+            self.back_btn.setVisible(True)
+            self.next_btn.setEnabled(False)
+
+        elif self.state == self.STATE_DRAW_ROI:
+            if not self.validate_roi_box():
+                return
+
+            # Advance to preview
+            self.state = self.STATE_PREVIEW
+            self.name_label.setVisible(True)
+            self.name_input.setVisible(True)
+            self.next_btn.setText("Save")
+            self.next_btn.setEnabled(True)
+
+        elif self.state == self.STATE_PREVIEW:
+            # Save and close
+            self.save_and_close()
+            return
+
+        self.update_instructions()
+        self.update_display()
+        self.validate_and_update_buttons()
+
+    def save_and_close(self):
+        """Package template data and close dialog."""
+        # Get template name
+        name = self.name_input.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Invalid Name", "Please enter a template name.")
+            return
+
+        # Sanitize name
+        name = ''.join(c for c in name if c.isalnum() or c in ('_', '-'))
+        if not name:
+            QMessageBox.warning(self, "Invalid Name", "Template name must contain alphanumeric characters.")
+            return
+
+        # Normalize ROI coordinates
+        x1, y1 = self.roi_corners[0]
+        x2, y2 = self.roi_corners[1]
+        x1, x2 = min(x1, x2), max(x1, x2)
+        y1, y2 = min(y1, y2), max(y1, y2)
+
+        # Create template data dictionary
+        self.template_data = {
+            'template_image': self.captured_frame.copy(),
+            'panel_mask': self.create_panel_mask(),
+            'panel_polygon': np.array(self.panel_points, dtype=np.int32),
+            'roi_box': np.array([x1, y1, x2, y2], dtype=np.int32),
+            'digit_count': self.digit_spin.value(),
+            'zoom_level': self.zoom_level,
+            'timestamp': datetime.datetime.now().isoformat(),
+            'camera_source': self.camera_source
+        }
+
+        self.template_name = name
+
+        # Accept dialog (success)
+        self.accept()
+
+    def get_template_data(self):
+        """
+        Get the created template data.
+        Called by parent after dialog.exec_() returns Accepted.
+
+        Returns:
+            Tuple: (template_data dict, template_name string)
+        """
+        return self.template_data, self.template_name
+
 
 # this is the window that playes the selected video with dynamic playrate
 class VideoWindow(QMainWindow):
@@ -539,6 +1639,31 @@ class MainWindow(QDialog):
         else:
             self.source1.setChecked(True)
 
+        # Template-based auto-detection widgets
+        self.template_label = QtWidgets.QLabel(myGUI)
+        self.template_label.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(100 * SCALE_UI), int(71 * SCALE_UI), int(16 * SCALE_UI)))
+        self.template_label.setText("Template:")
+        self.template_label.setObjectName("template_label")
+
+        self.template_combo = QtWidgets.QComboBox(myGUI)
+        self.template_combo.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(118 * SCALE_UI), int(100 * SCALE_UI), int(21 * SCALE_UI)))
+        self.template_combo.setObjectName("template_combo")
+        self.template_combo.currentIndexChanged.connect(self.on_template_changed)
+
+        self.capture_template_btn = QtWidgets.QPushButton(myGUI)
+        self.capture_template_btn.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(142 * SCALE_UI), int(70 * SCALE_UI), int(23 * SCALE_UI)))
+        self.capture_template_btn.setText("Capture")
+        self.capture_template_btn.setStyleSheet("background-color: orange; color: white; font-weight: bold;")
+        self.capture_template_btn.setObjectName("capture_template_btn")
+        self.capture_template_btn.clicked.connect(self.capture_template)
+
+        self.auto_calibrate_btn = QtWidgets.QPushButton(myGUI)
+        self.auto_calibrate_btn.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(168 * SCALE_UI), int(70 * SCALE_UI), int(23 * SCALE_UI)))
+        self.auto_calibrate_btn.setText("Auto-Cal")
+        self.auto_calibrate_btn.setStyleSheet("background-color: orange; color: white; font-weight: bold;")
+        self.auto_calibrate_btn.setObjectName("auto_calibrate_btn")
+        self.auto_calibrate_btn.clicked.connect(self.auto_calibrate_roi)
+
         self.label_4 = QtWidgets.QLabel(myGUI)
         self.label_4.setGeometry(QtCore.QRect(int(20 * SCALE_UI), int(10 * SCALE_UI), int(71 * SCALE_UI), int(16 * SCALE_UI)))
         self.label_4.setObjectName("label_4")
@@ -611,7 +1736,28 @@ class MainWindow(QDialog):
         self.videowindow=None
         self.starttime = time.time()
         self.defaultspeed=DEFAULT_SPEED
+
+        # Initialize template system for auto-detection
+        print("Initializing template system...")
+        self.template_manager = TemplateManager()
+        self.roi_matcher = ROIMatcher()
+
+        # Populate template dropdown
+        self.update_template_list()
+
+        # Set active template from config
+        active_template = config_data.get("template", "active_template", fallback="default")
+        index = self.template_combo.findText(active_template)
+        if index >= 0:
+            self.template_combo.setCurrentIndex(index)
+
         self.start_camera()
+
+        # Schedule startup auto-calibration (1 second delay to allow camera init)
+        auto_cal = config_data.get("template", "auto_calibrate_on_startup", fallback="true")
+        if auto_cal.lower() == "true" and self.template_combo.currentText() != "(no templates)":
+            QTimer.singleShot(1000, self.auto_calibrate_on_startup)
+
         self.show()
 
     def on_click_button_good(self):
@@ -1093,6 +2239,246 @@ class MainWindow(QDialog):
                         item.setBackground(QBrush(light_red))
                     else:
                         item.setBackground(QBrush(white))
+
+    # ===== TEMPLATE-BASED AUTO-DETECTION INTEGRATION METHODS =====
+
+    def update_template_list(self):
+        """Populate template dropdown with available templates."""
+        current = self.template_combo.currentText()
+        self.template_combo.clear()
+
+        templates = self.template_manager.list_templates()
+
+        if not templates:
+            self.template_combo.addItem("(no templates)")
+            self.auto_calibrate_btn.setEnabled(False)
+        else:
+            for name in templates:
+                self.template_combo.addItem(name)
+            self.auto_calibrate_btn.setEnabled(True)
+
+            # Restore previous selection
+            index = self.template_combo.findText(current)
+            if index >= 0:
+                self.template_combo.setCurrentIndex(index)
+
+    def on_template_changed(self, index):
+        """Handle template dropdown selection change."""
+        name = self.template_combo.currentText()
+
+        if name and name != "(no templates)":
+            config_data["template"]["active_template"] = name
+            self.save_configs()
+            self.regionselection.setText(f"Template: {name}")
+            print(f"Active template: {name}")
+
+    def capture_template(self):
+        """Open dialog to capture new template from current frame."""
+        # Check camera ready
+        if self.frame_shape is None:
+            QMessageBox.warning(self, "Camera Not Ready",
+                "Wait for camera to initialize.")
+            return
+
+        # Get current frame from graphicsView
+        pixmap = self.graphicsView.pixmap()
+        if pixmap is None:
+            QMessageBox.warning(self, "No Frame", "No webcam frame available.")
+            return
+
+        # Convert QPixmap to numpy array
+        image = pixmap.toImage()
+        w, h = image.width(), image.height()
+        ptr = image.bits()
+        ptr.setsize(h * w * 4)
+        arr = np.array(ptr).reshape(h, w, 4)
+        frame_bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+
+        # Open template capture dialog
+        camera_source = self.source_group.checkedId()
+        zoom_level = self.zoomlevel.value()
+
+        dialog = TemplateCaptureDialog(self, frame_bgr, camera_source, zoom_level)
+
+        if dialog.exec_() == QDialog.Accepted:
+            template_data, name = dialog.get_template_data()
+
+            # Save template
+            if self.template_manager.save_template(name, template_data):
+                config_data["template"]["active_template"] = name
+                self.save_configs()
+
+                self.update_template_list()
+                index = self.template_combo.findText(name)
+                if index >= 0:
+                    self.template_combo.setCurrentIndex(index)
+
+                QMessageBox.information(self, "Success",
+                    f"Template '{name}' saved.\n\nClick Auto-Cal to detect ROI.")
+            else:
+                QMessageBox.critical(self, "Failed", f"Failed to save '{name}'.")
+
+    def auto_calibrate_roi(self):
+        """
+        Automatically detect ROI using template matching.
+        This is the core method that ties everything together.
+        """
+        # Get active template
+        name = self.template_combo.currentText()
+
+        if not name or name == "(no templates)":
+            QMessageBox.warning(self, "No Template",
+                "Create a template first (click Capture).")
+            return
+
+        # Load template
+        template_data = self.template_manager.load_template(name)
+        if template_data is None:
+            QMessageBox.critical(self, "Load Failed", f"Failed to load '{name}'.")
+            return
+
+        # Get current frame
+        pixmap = self.graphicsView.pixmap()
+        if pixmap is None:
+            QMessageBox.warning(self, "No Frame", "No webcam frame available.")
+            return
+
+        # Convert to numpy
+        image = pixmap.toImage()
+        w, h = image.width(), image.height()
+        ptr = image.bits()
+        ptr.setsize(h * w * 4)
+        arr = np.array(ptr).reshape(h, w, 4)
+        live_frame = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+
+        # Get threshold
+        threshold = float(config_data.get("template", "confidence_threshold", fallback="0.70"))
+
+        # Match template
+        print(f"\nAuto-calibrating with '{name}'...")
+        roi_coords, confidence = self.roi_matcher.match_template(
+            live_frame, template_data, threshold
+        )
+
+        if roi_coords is None:
+            # Failed
+            msg = (f"Auto-calibration failed (confidence: {confidence:.1%}).\n\n"
+                   "Possible reasons:\n"
+                   "- Camera/treadmill moved significantly\n"
+                   "- Lighting changed dramatically\n"
+                   "- Wrong template for current setup\n\n"
+                   "Options:\n"
+                   "- Retry (adjust position, click Auto-Cal again)\n"
+                   "- Create new template (click Capture)\n"
+                   "- Manual selection (two clicks on webcam)")
+
+            QMessageBox.warning(self, "Failed", msg)
+            self.regionselection.setText(f"Auto-cal failed ({confidence:.0%})")
+            self.regionselection.setStyleSheet("color: red;")
+            return
+
+        # Success!
+        x1, y1, x2, y2 = roi_coords
+        digit_count = int(template_data['digit_count'])
+        zoom_level = int(template_data['zoom_level'])
+
+        # Update internal state (same as manual ROI selection)
+        self.coordinate1 = (x1, y1, zoom_level)
+        self.coordinate2 = (x2, y2, zoom_level)
+        self.selected_ROI = True
+        self.digitcount = digit_count
+
+        # Update digit count radio buttons
+        digit_map = {1: self.digitcount1, 2: self.digitcount2,
+                     3: self.digitcount3, 4: self.digitcount4, 5: self.digitcount5}
+        if digit_count in digit_map:
+            digit_map[digit_count].setChecked(True)
+
+        # Save to config
+        config_data["main"]["roi"] = f"{x1},{y1},{x2},{y2},{digit_count}"
+        self.save_configs()
+
+        # Update UI
+        self.regionselection.setText(f"Auto-cal OK ({confidence:.0%})")
+        self.regionselection.setStyleSheet("color: green; font-weight: bold;")
+
+        QMessageBox.information(self, "Success",
+            f"ROI detected!\n\n"
+            f"Confidence: {confidence:.1%}\n"
+            f"ROI: ({x1}, {y1}, {x2}, {y2})\n"
+            f"Digits: {digit_count}")
+
+        print(f"Auto-calibration successful: {confidence:.1%}, ROI=({x1},{y1},{x2},{y2})")
+
+    def auto_calibrate_on_startup(self):
+        """
+        Perform silent auto-calibration on startup.
+        Called 1 second after camera starts.
+        """
+        print("Attempting startup auto-calibration...")
+
+        # Skip if ROI already selected
+        if self.selected_ROI:
+            print("ROI already set, skipping")
+            return
+
+        # Get template
+        name = self.template_combo.currentText()
+        if not name or name == "(no templates)":
+            return
+
+        template_data = self.template_manager.load_template(name)
+        if template_data is None:
+            return
+
+        # Get frame
+        pixmap = self.graphicsView.pixmap()
+        if pixmap is None:
+            print("No frame yet, skipping")
+            return
+
+        # Convert frame
+        image = pixmap.toImage()
+        w, h = image.width(), image.height()
+        ptr = image.bits()
+        ptr.setsize(h * w * 4)
+        arr = np.array(ptr).reshape(h, w, 4)
+        live_frame = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+
+        # Match
+        threshold = float(config_data.get("template", "confidence_threshold", fallback="0.70"))
+        roi_coords, confidence = self.roi_matcher.match_template(
+            live_frame, template_data, threshold
+        )
+
+        if roi_coords is not None:
+            # Success (silent)
+            x1, y1, x2, y2 = roi_coords
+            digit_count = int(template_data['digit_count'])
+            zoom_level = int(template_data['zoom_level'])
+
+            self.coordinate1 = (x1, y1, zoom_level)
+            self.coordinate2 = (x2, y2, zoom_level)
+            self.selected_ROI = True
+            self.digitcount = digit_count
+
+            digit_map = {1: self.digitcount1, 2: self.digitcount2,
+                         3: self.digitcount3, 4: self.digitcount4, 5: self.digitcount5}
+            if digit_count in digit_map:
+                digit_map[digit_count].setChecked(True)
+
+            config_data["main"]["roi"] = f"{x1},{y1},{x2},{y2},{digit_count}"
+            self.save_configs()
+
+            self.regionselection.setText(f"Auto-cal OK ({confidence:.0%})")
+            self.regionselection.setStyleSheet("color: green; font-weight: bold;")
+
+            print(f"Startup auto-cal successful: {confidence:.1%}")
+        else:
+            # Failed (silent, just show status)
+            self.regionselection.setText(f"Auto-cal failed ({confidence:.0%})")
+            self.regionselection.setStyleSheet("color: red;")
+            print(f"Startup auto-cal failed: {confidence:.1%}")
 
     # play selected video
     def play_movie(self):
