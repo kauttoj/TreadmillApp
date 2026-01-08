@@ -97,18 +97,17 @@ def register_image(image,offset_image):
 
     # pixel precision first
     shift, error, diffphase = phase_cross_correlation(image, np.fft.fft2(cv2.cvtColor(offset_image,cv2.COLOR_BGR2GRAY)),space='fourier')
-    # subpixel precision
-    # shift, error, diffphase = phase_cross_correlation(image, offset_image,
-    #print(f"Detected subpixel offset (y, x): {shift}")
+
     if abs(shift[0])>MAX_CORRECTION:
         shift[0] = 0
     if abs(shift[1])>MAX_CORRECTION:
         shift[1] = 0
 
-    offset_image = np.roll(offset_image,int(shift[0]),axis=0)
-    offset_image = np.roll(offset_image,int(shift[1]),axis=1)
-    #if abs(shift[0])+abs(shift[1])>0:
-    #    print('fixed motion for x=%i, y=%i' % (shift[0],shift[1]))
+    # Combined roll - single allocation instead of two
+    shift_y, shift_x = int(shift[0]), int(shift[1])
+    if shift_y != 0 or shift_x != 0:
+        offset_image = np.roll(offset_image, (shift_y, shift_x), axis=(0, 1))
+
     return offset_image
 
 
@@ -202,6 +201,9 @@ class TemplateManager:
 
             # Convert to regular dict
             template_dict = {key: data[key] for key in required_keys}
+
+            # Add placeholder for cached preprocessed image
+            template_dict['template_gray_enhanced'] = None
 
             # Store as current template
             self.current_template = template_dict
@@ -364,6 +366,22 @@ class ROIMatcher:
 
         return enhanced
 
+    def preprocess_template(self, template_data):
+        """
+        Preprocess and cache template grayscale image.
+
+        Args:
+            template_data: Template dictionary
+
+        Returns:
+            Cached preprocessed grayscale template image
+        """
+        if template_data.get('template_gray_enhanced') is None:
+            template_data['template_gray_enhanced'] = self.preprocess_image(
+                template_data['template_image']
+            )
+        return template_data['template_gray_enhanced']
+
     def validate_similarity(self, H):
         """
         Validate that similarity transformation is reasonable.
@@ -514,8 +532,8 @@ class ROIMatcher:
             Tuple: ([x1, y1, x2, y2], matching_ratio, H) or (None, matching_ratio, None)
         """
         try:
-            # Step 1: Preprocess images
-            template_gray = self.preprocess_image(template_data['template_image'])
+            # Step 1: Preprocess images (template cached, live preprocessed each time)
+            template_gray = self.preprocess_template(template_data)
             live_gray = self.preprocess_image(live_frame)
 
             # Step 2: Detect features
@@ -1345,7 +1363,7 @@ class VideoWindow(QMainWindow):
         self.positionslider.sliderPressed.connect(self.set_position)
 
         self.timer = QTimer(self)
-        self.timer.setInterval(500) # polling every 250ms
+        self.timer.setInterval(500) # polling every 500ms
         self.media_duration=-1
         self.timer.timeout.connect(self.update_ui)
         self.timer.start()
@@ -1583,11 +1601,18 @@ class MainWindow(QMainWindow):
         self.selected_ROI = False
         self.coordinate1 = None
         self.coordinate2 = None
+        self.coord_capture_context = None  # Store transformation context when coordinates are captured
         self.roi_in_frame_space = False  # True if ROI coordinates are already in frame space (from auto-cal)
+        self.roi_lock = threading.Lock()  # Protect ROI coordinate access between threads
 
         # Frame processing state
         self.frame_shape = None
         self.frame_scaling = None
+        self.frame_padding = None
+        self.zoom_cut = {}
+        self.zoom_multiplier = {}
+        self.cached_view_size = (0, 0)  # Cache for QPixmap scaling dimensions
+        self.need_transform_recalc = False  # Flag to trigger transformation recalculation after resize
 
         # File management
         self.filelist = None
@@ -1629,6 +1654,14 @@ class MainWindow(QMainWindow):
         self.template_manager = TemplateManager()
         self.roi_matcher = ROIMatcher()
 
+        # Cache template config values (avoid repeated string parsing)
+        self.auto_calibrate_on_startup_enabled = config_data.get(
+            "template", "auto_calibrate_on_startup", fallback="true"
+        ).lower() == "true"
+        self.matching_threshold = float(config_data.get(
+            "template", "matching_threshold", fallback="0.50"
+        ))
+
         # Load predefined ROI from config if available
         try:
             roi_parts = config_data.get("main", "roi").split(",")
@@ -1663,8 +1696,7 @@ class MainWindow(QMainWindow):
         self.start_camera()
 
         # Schedule startup auto-calibration (1 second delay to allow camera init)
-        auto_cal = config_data.get("template", "auto_calibrate_on_startup", fallback="true")
-        if auto_cal.lower() == "true" and self.template_combo.currentText() != "(no templates)":
+        if self.auto_calibrate_on_startup_enabled and self.template_combo.currentText() != "(no templates)":
             QTimer.singleShot(1000, self.auto_calibrate_on_startup)
 
         # Set initial speed
@@ -2486,6 +2518,14 @@ class MainWindow(QMainWindow):
                 )
                 self.graphicsView.setPixmap(scaled_pixmap)
 
+                # Trigger recalculation of transformation parameters in camera thread
+                self.need_transform_recalc = True
+
+                # Clear any in-progress ROI selection since transforms will change
+                if self.coordinate1 is not None and self.coordinate2 is None:
+                    self.coordinate1 = None
+                    self.coord_capture_context = None
+
     def calculate_lcd_digit_count(self):
         """Calculate the required LCD digit count based on digitcount and precision.
 
@@ -2630,25 +2670,72 @@ class MainWindow(QMainWindow):
     # clicked webcam frame
     def mousedown(self, e):
         # Record starting (x,y) coordinates on left mouse button click
-        if e.button()==1 and not(self.selected_ROI) and self.frame_shape is not None:
+        if e.button()==1 and self.frame_shape is not None:
             x = e.x()
             y = e.y()
             # Correct coordinates for view flips
             x, y = self.correct_mouse_coords_for_flip(x, y)
+
+            # If ROI is complete (both coordinates set), clear it to start fresh
+            if self.selected_ROI and self.coordinate1 is not None and self.coordinate2 is not None:
+                self.selected_ROI = False
+                self.coordinate1 = None
+                self.coordinate2 = None
+                self.coord_capture_context = None
+                self.roi_in_frame_space = False
+                print("Cleared existing ROI, click again to start drawing")
+                return
+
             if self.coordinate1 is None:
-                self.coordinate1 = (x, y,self.zoomlevel.value())
+                self.coordinate1 = (x, y, self.zoomlevel.value())
                 self.coordinate2 = None
                 self.selected_ROI = False
                 print("mouse coord 1 (x, y) = (%i, %i)" % (self.coordinate1[0], self.coordinate1[1]))
             else:
-                self.coordinate2 = (x, y, self.zoomlevel.value())
-                print("mouse coord 2 (x, y) = (%i, %i)" % (self.coordinate2[0], self.coordinate2[1]))
+                # Normalize coordinates so ROI can be drawn in any direction
+                # This allows drawing from any corner (top-left, bottom-right, etc.)
+                x1 = min(self.coordinate1[0], x)
+                y1 = min(self.coordinate1[1], y)
+                x2 = max(self.coordinate1[0], x)
+                y2 = max(self.coordinate1[1], y)
+
+                self.coordinate1 = (x1, y1, self.zoomlevel.value())
+                self.coordinate2 = (x2, y2, self.zoomlevel.value())
+                print("mouse coord 2 (x, y) = (%i, %i)" % (x, y))
+                print("Normalized ROI: (%i, %i) to (%i, %i)" % (x1, y1, x2, y2))
                 self.selected_ROI = True
-                self.roi_in_frame_space = False  # Manual selection: coordinates are in VIEW space
+
+                # Convert to FRAME space immediately and mark as such so it won't be affected by window resize
+                if self.frame_padding is not None and self.frame_scaling is not None:
+                    # Convert VIEW coordinates to FRAME coordinates
+                    zoom_level = self.coordinate1[2]
+                    fx1 = (self.coordinate1[0] - self.frame_padding["width"]) * self.zoom_multiplier[zoom_level] + self.zoom_cut[zoom_level]["view"]["width"]
+                    fy1 = (self.coordinate1[1] - self.frame_padding["height"]) * self.zoom_multiplier[zoom_level] + self.zoom_cut[zoom_level]["view"]["height"]
+                    fx2 = (self.coordinate2[0] - self.frame_padding["width"]) * self.zoom_multiplier[zoom_level] + self.zoom_cut[zoom_level]["view"]["width"]
+                    fy2 = (self.coordinate2[1] - self.frame_padding["height"]) * self.zoom_multiplier[zoom_level] + self.zoom_cut[zoom_level]["view"]["height"]
+
+                    # Normalize
+                    fx1, fx2 = min(fx1, fx2), max(fx1, fx2)
+                    fy1, fy2 = min(fy1, fy2), max(fy1, fy2)
+
+                    # Scale to frame
+                    fx1 = int(fx1 * self.frame_scaling["width"])
+                    fy1 = int(fy1 * self.frame_scaling["height"])
+                    fx2 = int(fx2 * self.frame_scaling["width"])
+                    fy2 = int(fy2 * self.frame_scaling["height"])
+
+                    # Store as FRAME coordinates
+                    self.coordinate1 = (fx1, fy1, 0)
+                    self.coordinate2 = (fx2, fy2, 0)
+                    self.roi_in_frame_space = True
+                    print("Converted to FRAME space: (%i, %i) to (%i, %i)" % (fx1, fy1, fx2, fy2))
+                else:
+                    self.roi_in_frame_space = False  # Manual selection: coordinates are in VIEW space
+
                 # update config file
                 config_data["main"]["roi"] = "%i,%i,%i,%i,%i,%i" % (
                     self.coordinate1[0], self.coordinate1[1], self.coordinate2[0], self.coordinate2[1],
-                    self.zoomlevel.value(), 0)  # 0 = view space
+                    self.zoomlevel.value(), 1 if self.roi_in_frame_space else 0)
 
                 # Stop any pending debounced saves to prevent race conditions
                 self.config_save_timer.stop()
@@ -2659,6 +2746,7 @@ class MainWindow(QMainWindow):
             self.selected_ROI = False
             self.coordinate1 = None
             self.coordinate2 = None
+            self.coord_capture_context = None
             self.roi_in_frame_space = False
             self.regionselection.setText("No ROI selected")
 
@@ -2699,8 +2787,7 @@ class MainWindow(QMainWindow):
         print("Starting video capture")
         init_run=0
         template_frame = 0 # this will be FFT transformed
-        zoom_cut = {}
-        zoom_multiplier = {}
+        # Now using instance variables self.zoom_cut and self.zoom_multiplier
         old_ROI=None
 
         # Track shift values to detect changes and rebuild template
@@ -2708,24 +2795,32 @@ class MainWindow(QMainWindow):
         last_shift_y = SHIFT_CENTER_Y
 
         # convert view coordinates to actual coordinates in acquired frame. Need to take into account padding and zooming!
-        def view_to_frame(coordinate1,coordinate2):
+        def view_to_frame(coordinate1, coordinate2):
+            """
+            Convert VIEW space coordinates to FRAME space coordinates.
+
+            Args:
+                coordinate1: (x, y, zoom) in VIEW space
+                coordinate2: (x, y, zoom) in VIEW space
+            """
+            zoom_level = coordinate1[2]
+
             # remove padded pixels outside frame, convert to zoom=1 scale and add cropped pixels
-            x1 = (coordinate1[0]-self.frame_padding["width"]) * zoom_multiplier[coordinate1[2]] + zoom_cut[coordinate1[2]]["view"]["width"]
-            y1 = (coordinate1[1]-self.frame_padding["height"]) * zoom_multiplier[coordinate1[2]] + zoom_cut[coordinate1[2]]["view"]["height"]
+            x1 = (coordinate1[0] - self.frame_padding["width"]) * self.zoom_multiplier[zoom_level] + self.zoom_cut[zoom_level]["view"]["width"]
+            y1 = (coordinate1[1] - self.frame_padding["height"]) * self.zoom_multiplier[zoom_level] + self.zoom_cut[zoom_level]["view"]["height"]
 
-            x2 = (coordinate2[0]-self.frame_padding["width"]) * zoom_multiplier[coordinate1[2]] + zoom_cut[coordinate1[2]]["view"]["width"]
-            y2 = (coordinate2[1]-self.frame_padding["height"]) * zoom_multiplier[coordinate1[2]] + zoom_cut[coordinate1[2]]["view"]["height"]
+            x2 = (coordinate2[0] - self.frame_padding["width"]) * self.zoom_multiplier[zoom_level] + self.zoom_cut[zoom_level]["view"]["width"]
+            y2 = (coordinate2[1] - self.frame_padding["height"]) * self.zoom_multiplier[zoom_level] + self.zoom_cut[zoom_level]["view"]["height"]
 
-            x1 = min(x1, x2)
-            x2 = max(x1, x2)
-            y1 = min(y1, y2)
-            y2 = max(y1, y2)
+            # Normalize coordinates using tuple unpacking (evaluates RHS before assignment)
+            x1, x2 = min(x1, x2), max(x1, x2)
+            y1, y2 = min(y1, y2), max(y1, y2)
 
             # scale coordinates to frame
             x1 = int(x1 * self.frame_scaling["width"])
             y1 = int(y1 * self.frame_scaling["height"])
             x2 = int(x2 * self.frame_scaling["width"])
-            y2 = int(y2 * self.frame_scaling["height"])            
+            y2 = int(y2 * self.frame_scaling["height"])
 
             return x1, y1, x2, y2
         
@@ -2767,9 +2862,14 @@ class MainWindow(QMainWindow):
 
                 if init_run<INITIAL_FRAMES:
 
-                    image = QtGui.QImage(frame.data, frame.shape[1], frame.shape[0], QtGui.QImage.Format_RGB888).rgbSwapped()
+                    image = QtGui.QImage(frame.data.tobytes(), frame.shape[1], frame.shape[0], frame.shape[1] * 3, QtGui.QImage.Format_RGB888).rgbSwapped()
                     pixmap = QtGui.QPixmap.fromImage(image)
-                    pixmap = pixmap.scaled(self.graphicsView.width(), self.graphicsView.height(), QtCore.Qt.KeepAspectRatio)
+
+                    # Cache view size for scaling
+                    current_view_size = (self.graphicsView.width(), self.graphicsView.height())
+                    if current_view_size != self.cached_view_size:
+                        self.cached_view_size = current_view_size
+                    pixmap = pixmap.scaled(self.cached_view_size[0], self.cached_view_size[1], QtCore.Qt.KeepAspectRatio)
 
                     # Apply flips if enabled
                     if self.flip_horizontal or self.flip_vertical:
@@ -2790,19 +2890,19 @@ class MainWindow(QMainWindow):
                         self.frame_padding = {"width":int((self.graphicsView.width() - pixmap.width()) / 2),"height":int((self.graphicsView.height() - pixmap.height()) / 2)}
 
                         for zoom_level in [1,2,3]:
-                            zoom_cut[zoom_level] = {}
-                            zoom_cut[zoom_level]["orig"] = {
+                            self.zoom_cut[zoom_level] = {}
+                            self.zoom_cut[zoom_level]["orig"] = {
                                 "width":((self.frame_shape["width"] / 2) * (zoom_level-1) / 4),
                                 "height":((self.frame_shape["height"] / 2) * (zoom_level-1) / 4),
                             }
-                            zoom_cut[zoom_level]["view"] = {
-                                "width":int(zoom_cut[zoom_level]["orig"]["width"]/self.frame_scaling["width"]),
-                                "height":int(zoom_cut[zoom_level]["orig"]["height"]/self.frame_scaling["height"]),
+                            self.zoom_cut[zoom_level]["view"] = {
+                                "width":int(self.zoom_cut[zoom_level]["orig"]["width"]/self.frame_scaling["width"]),
+                                "height":int(self.zoom_cut[zoom_level]["orig"]["height"]/self.frame_scaling["height"]),
                             }
-                            zoom_cut[zoom_level]["orig"]["width"]=int(zoom_cut[zoom_level]["orig"]["width"])
-                            zoom_cut[zoom_level]["orig"]["height"] = int(zoom_cut[zoom_level]["orig"]["height"])
+                            self.zoom_cut[zoom_level]["orig"]["width"]=int(self.zoom_cut[zoom_level]["orig"]["width"])
+                            self.zoom_cut[zoom_level]["orig"]["height"] = int(self.zoom_cut[zoom_level]["orig"]["height"])
 
-                            zoom_multiplier[zoom_level] = 1 - (zoom_level-1)/4
+                            self.zoom_multiplier[zoom_level] = 1 - (zoom_level-1)/4
 
                         self.graphicsView.setMouseTracking(True)
                         self.graphicsView.mouseMoveEvent = self.mousemove
@@ -2810,6 +2910,54 @@ class MainWindow(QMainWindow):
                         self.graphicsView.mouseReleaseEvent = self.mouseup
 
                 else:
+                    # Check if we need to recalculate transformation parameters (after window resize)
+                    if self.need_transform_recalc:
+                        # Get current pixmap to recalculate transformations
+                        image = QtGui.QImage(frame.data.tobytes(), frame.shape[1], frame.shape[0], frame.shape[1] * 3, QtGui.QImage.Format_RGB888).rgbSwapped()
+                        pixmap = QtGui.QPixmap.fromImage(image)
+
+                        # Update cache
+                        current_view_size = (self.graphicsView.width(), self.graphicsView.height())
+                        self.cached_view_size = current_view_size
+                        pixmap = pixmap.scaled(self.cached_view_size[0], self.cached_view_size[1], QtCore.Qt.KeepAspectRatio)
+
+                        # Apply flips if enabled
+                        if self.flip_horizontal or self.flip_vertical:
+                            transform = QtGui.QTransform()
+                            transform.scale(-1 if self.flip_horizontal else 1, -1 if self.flip_vertical else 1)
+                            pixmap = pixmap.transformed(transform)
+
+                        # Recalculate transformation parameters with new pixmap size
+                        self.frame_scaling = {"width":self.frame_shape["width"]/pixmap.width(),"height":self.frame_shape["height"]/pixmap.height()}
+                        self.frame_padding = {"width":int((self.graphicsView.width() - pixmap.width()) / 2),"height":int((self.graphicsView.height() - pixmap.height()) / 2)}
+
+                        for zoom_level in [1,2,3]:
+                            self.zoom_cut[zoom_level] = {}
+                            self.zoom_cut[zoom_level]["orig"] = {
+                                "width":((self.frame_shape["width"] / 2) * (zoom_level-1) / 4),
+                                "height":((self.frame_shape["height"] / 2) * (zoom_level-1) / 4),
+                            }
+                            self.zoom_cut[zoom_level]["view"] = {
+                                "width":int(self.zoom_cut[zoom_level]["orig"]["width"]/self.frame_scaling["width"]),
+                                "height":int(self.zoom_cut[zoom_level]["orig"]["height"]/self.frame_scaling["height"]),
+                            }
+                            self.zoom_cut[zoom_level]["orig"]["width"]=int(self.zoom_cut[zoom_level]["orig"]["width"])
+                            self.zoom_cut[zoom_level]["orig"]["height"] = int(self.zoom_cut[zoom_level]["orig"]["height"])
+
+                            self.zoom_multiplier[zoom_level] = 1 - (zoom_level-1)/4
+
+                        self.need_transform_recalc = False
+                        print("Recalculated transformation parameters after resize")
+
+                        # If there's a selected ROI in VIEW space, clear it since the transformation changed
+                        # (New ROIs are immediately converted to FRAME space, so this only affects legacy ROIs)
+                        if self.selected_ROI and not self.roi_in_frame_space:
+                            print("Clearing VIEW-space ROI after resize (please redefine)")
+                            self.selected_ROI = False
+                            self.coordinate1 = None
+                            self.coordinate2 = None
+                            self.roi_in_frame_space = False
+
                     frame = register_image(template_frame,frame)
 
                     if self.selected_ROI:
@@ -2822,16 +2970,17 @@ class MainWindow(QMainWindow):
                         else:
                             # Coordinates are in view space (from manual click)
                             # Need to convert to frame space
-                            x1,y1,x2,y2 = view_to_frame(self.coordinate1,self.coordinate2)
+                            x1,y1,x2,y2 = view_to_frame(self.coordinate1, self.coordinate2)
 
                         ROI = [x1,y1,x2,y2,self.digitcount] # [x1,y1,x2,y2,digit_count]
 
                         # Validate ROI
-                        if (x2-x1)<40 or (y2-y1)<20 or (ROI[2]>frame.shape[1]) or (ROI[3]>frame.shape[0]) or (self.coordinate1[2] != self.coordinate2[2]):
-                            print("Bad ROI, resetting")
+                        if (x2-x1)<40 or (y2-y1)<20 or x1<0 or y1<0 or (ROI[2]>frame.shape[1]) or (ROI[3]>frame.shape[0]) or (self.coordinate1[2] != self.coordinate2[2]):
+                            print("Bad ROI, resetting (x1=%i, y1=%i, x2=%i, y2=%i, frame.shape=%s)" % (x1,y1,x2,y2,str(frame.shape)))
                             self.selected_ROI = False
                             self.coordinate1 = None
                             self.coordinate2 = None
+                            self.coord_capture_context = None
                             self.roi_in_frame_space = False
                             continue
 
@@ -2842,7 +2991,7 @@ class MainWindow(QMainWindow):
 
                         # if enough time passed, analyze digits
                         if (now - last_prediction_time)*1000 > PREDICT_INTERVAL:
-                            predicted_digits,predicted_prob,rectangles,raw_frames = predict_digit(frame, ROI, False, False)
+                            predicted_digits,predicted_prob,rectangles,raw_frames = predict_digit(frame, ROI)
                             if predicted_digits is None:
                                 # failed, just use last valid prediction
                                 predicted_speed = current_running_speed
@@ -2895,9 +3044,9 @@ class MainWindow(QMainWindow):
                         #for r in self.digit_ROIs:
                         #    self.frame = cv2.rectangle(self.frame, (r[1][0]+x1,r[1][1]+y1), (r[1][2]+x1,r[1][3]+y1), (0,50,255), 2)
                     elif self.coordinate1 is not None:
-                        # obtain coordinated in frame view
-                        #self.mouse_pos = self.coordinate1
-                        x1, y1, x2, y2 = view_to_frame(self.coordinate1, self.mouse_pos)
+                        # Draw preview rectangle while user is selecting second coordinate
+                        mouse_pos_with_zoom = self.mouse_pos + (self.coordinate1[2],)  # Add zoom level to mouse_pos
+                        x1, y1, x2, y2 = view_to_frame(self.coordinate1, mouse_pos_with_zoom)
                         frame = cv2.rectangle(frame, (x1,y1),(x2,y2), (0, 255, 0), 2)
                         rectangles = None
                         old_ROI = None
@@ -2907,11 +3056,16 @@ class MainWindow(QMainWindow):
 
                     zoom_level = self.zoomlevel.value()
                     if zoom_level > 1:
-                        frame = frame[zoom_cut[zoom_level]["orig"]["height"]:-zoom_cut[zoom_level]["orig"]["height"], zoom_cut[zoom_level]["orig"]["width"]:-zoom_cut[zoom_level]["orig"]["width"], :]
+                        frame = frame[self.zoom_cut[zoom_level]["orig"]["height"]:-self.zoom_cut[zoom_level]["orig"]["height"], self.zoom_cut[zoom_level]["orig"]["width"]:-self.zoom_cut[zoom_level]["orig"]["width"], :]
 
-                    image = QtGui.QImage(frame.data.tobytes(), frame.shape[1], frame.shape[0], QtGui.QImage.Format_RGB888).rgbSwapped()
+                    image = QtGui.QImage(frame.data.tobytes(), frame.shape[1], frame.shape[0], frame.shape[1] * 3, QtGui.QImage.Format_RGB888).rgbSwapped()
                     pixmap = QtGui.QPixmap.fromImage(image)
-                    pixmap = pixmap.scaled(self.graphicsView.width(), self.graphicsView.height(), QtCore.Qt.KeepAspectRatio)
+
+                    # Cache view size for scaling
+                    current_view_size = (self.graphicsView.width(), self.graphicsView.height())
+                    if current_view_size != self.cached_view_size:
+                        self.cached_view_size = current_view_size
+                    pixmap = pixmap.scaled(self.cached_view_size[0], self.cached_view_size[1], QtCore.Qt.KeepAspectRatio)
 
                     # Apply flips if enabled
                     if self.flip_horizontal or self.flip_vertical:
@@ -2941,11 +3095,22 @@ class MainWindow(QMainWindow):
     def updatefiles(self):
         # read all files with specific extension
         ROOT_PATH = self.videopathEdit.text() + os.sep
-        files = glob.glob(ROOT_PATH + "*.mp4")
-        files += glob.glob(ROOT_PATH + "*.webm")
-        files += glob.glob(ROOT_PATH + "*.mkv")
-        files += glob.glob(ROOT_PATH + "*.avi")
-        files = [{"full_filename":x,"filename":x.replace(ROOT_PATH, ''),"size":os.path.getsize(x),"rate":DEFAULT_SPEED,"duration":-1,'score':0} for x in files]
+        VALID_EXTENSIONS = {'.mp4', '.webm', '.mkv', '.avi'}
+
+        files = []
+        if os.path.isdir(ROOT_PATH):
+            for entry in os.scandir(ROOT_PATH):
+                if entry.is_file():
+                    ext = os.path.splitext(entry.name)[1].lower()
+                    if ext in VALID_EXTENSIONS:
+                        files.append({
+                            "full_filename": entry.path,
+                            "filename": entry.name,
+                            "size": entry.stat().st_size,
+                            "rate": DEFAULT_SPEED,
+                            "duration": -1,
+                            'score': 0
+                        })
 
         # update config file
         count = 0
@@ -3271,13 +3436,10 @@ class MainWindow(QMainWindow):
 
         live_frame = self.latest_full_frame.copy()
 
-        # Get threshold
-        threshold = float(config_data.get("template", "matching_threshold", fallback="0.50"))
-
         # Match template using robust multi-start optimization
         print(f"\nAuto-calibrating with '{name}'...")
         roi_coords, confidence, H = self.roi_matcher.match_template_robust(
-            live_frame, template_data, threshold, num_trials=20
+            live_frame, template_data, self.matching_threshold, num_trials=20
         )
 
         if roi_coords is None:
@@ -3369,9 +3531,8 @@ class MainWindow(QMainWindow):
         live_frame = self.latest_full_frame.copy()
 
         # Match using robust multi-start optimization
-        threshold = float(config_data.get("template", "matching_threshold", fallback="0.50"))
         roi_coords, confidence, H = self.roi_matcher.match_template_robust(
-            live_frame, template_data, threshold, num_trials=20
+            live_frame, template_data, self.matching_threshold, num_trials=20
         )
 
         if roi_coords is not None:
@@ -3448,7 +3609,49 @@ def weighted_median(data, weights):
     if cumulative_weights[median_idx] == midpoint:
         return np.mean(data[median_idx:median_idx + 2])
     return data[median_idx]
-    
+
+def compute_entropy(softmax_probs):
+    """
+    Compute normalized entropy from softmax distribution.
+
+    Args:
+        softmax_probs: numpy array of softmax probabilities [batch_size, num_classes]
+
+    Returns:
+        entropy_normalized: normalized entropy values [0, 1] where 0 is certain, 1 is maximally uncertain
+    """
+    epsilon = 1e-10
+    entropy = -np.sum(softmax_probs * np.log(softmax_probs + epsilon), axis=1)
+
+    # Normalize by max possible entropy (log of num_classes)
+    num_classes = softmax_probs.shape[1]
+    max_entropy = np.log(num_classes)
+    entropy_normalized = entropy / max_entropy
+
+    return entropy_normalized
+
+def compute_calibrated_confidence(softmax_probs, entropy_weight=0.5):
+    """
+    Compute calibrated confidence score combining max probability and entropy.
+
+    Args:
+        softmax_probs: numpy array of softmax probabilities [batch_size, num_classes]
+        entropy_weight: weight for entropy penalty (0 to 1), default 0.5
+
+    Returns:
+        confidence: calibrated confidence scores [0, 1] for each digit
+    """
+    # Get max probability for each digit
+    max_probs = np.max(softmax_probs, axis=1)
+
+    # Compute normalized entropy (0 = certain, 1 = uncertain)
+    entropy_normalized = compute_entropy(softmax_probs)
+
+    # Calibrated confidence: reduce confidence based on entropy
+    confidence = max_probs * (1 - entropy_weight * entropy_normalized)
+
+    return confidence
+
 # function to compute speed from current and historical measurements
 def speed_estimator(current_time,running_speed_history):
     prev_speeds = []
@@ -3467,63 +3670,45 @@ def speed_estimator(current_time,running_speed_history):
     return display_speed
 
 # given frame and ROI, return sub-images of digits
-def image_preprocessor(img,ROI,use_prev_box,use_detection,prev_boxes=None):
-
-    if prev_boxes is None:
-        prev_boxes=[]
+def image_preprocessor(img,ROI):
+    """Extract digit sub-images from ROI region."""
     ROI_w = ROI[2] - ROI[0]
     ROI_h = ROI[3] - ROI[1]
 
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    ROI_img = img[ROI[1]:(ROI[3] + 1), ROI[0]:(ROI[2] + 1), :]
-    gray = cv2.cvtColor(ROI_img, cv2.COLOR_BGR2GRAY)
-    thresh_inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-    # find contours
+    # Convert ROI to RGB
+    ROI_img = cv2.cvtColor(img[ROI[1]:(ROI[3] + 1), ROI[0]:(ROI[2] + 1), :], cv2.COLOR_BGR2RGB)
 
-    if use_detection:
-        contours = cv2.findContours(thresh_inv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]  #
-        boxes = [cv2.boundingRect(c) for c in contours]
-        boxes = [x for x in boxes if x[2] > ROI_img.shape[1] * 0.70 and x[3] > ROI_img.shape[0] * 0.70]
-        boxes = [x for x in sorted(boxes, key=lambda x: x[2] * x[3], reverse=True)]
+    # Use full ROI as bounding box
+    box = [0, 0, ROI_w, ROI_h]
 
-    add_to_hist = True
-    if not(use_detection) or len(boxes) == 0:
-        boxes = [[0,0,ROI_w,ROI_h]]
-        add_to_hist=False
-
-    box = boxes[0]
-    box = [max(0, box[0]), box[1], min(ROI_w, box[2]), box[3]] # x,y,w,h  ??
-
-    if use_detection and add_to_hist:
-        prev_boxes.append(box)
-        if len(prev_boxes)>50:
-            prev_boxes=prev_boxes[-50:]
-    if use_detection and use_prev_box:
-        box = [int(np.median([x[k] for x in prev_boxes])) for k in range(4)]
-
-    dx = int(np.round((box[2])/ROI[-1])) # width of one box
-    extra_pixels_x = int(np.ceil(dx*(EXTRA_PIXEL_RATIO)))
-    extra_pixels_y = 1# int(np.ceil(box[3]*(EXTRA_PIXEL_RATIO)))
+    dx = int(np.round(box[2] / ROI[-1]))  # width of one digit box
+    extra_pixels_x = int(np.ceil(dx * EXTRA_PIXEL_RATIO))
+    extra_pixels_y = 1
 
     digits = []
     rectangles = []
-    for part in range(ROI[-1]):
+
+    # Build lists in correct order directly (no reversal needed)
+    for part in range(ROI[-1] - 1, -1, -1):
         rectangles.append([
             ROI[0] + ROI_w - (box[0] + (dx * (part + 1))) - extra_pixels_x,
-            ROI[0] + ROI_w - (box[0]+(dx * part)) + extra_pixels_x,
-            ROI[1] + ROI_h-box[3] - extra_pixels_y,
-            ROI[3] - box[1] + extra_pixels_y])
-        sub_img = img[
-                  (ROI[1]+box[1]-extra_pixels_y):(ROI[1]+box[1] + box[3]+extra_pixels_y+1),
-                  (ROI[0]+box[0]+dx * part - extra_pixels_x):(ROI[0]+dx*(part + 1)+extra_pixels_x+1),
-                  :]
-        sub_img = np.flip(sub_img , axis=0)
-        sub_img = np.flip(sub_img , axis=1)
-        digits.append(sub_img)
-    digits = list(reversed(digits))
-    rectangles = list(reversed(rectangles))
+            ROI[0] + ROI_w - (box[0] + (dx * part)) + extra_pixels_x,
+            ROI[1] + ROI_h - box[3] - extra_pixels_y,
+            ROI[3] - box[1] + extra_pixels_y
+        ])
 
-    return digits,prev_boxes,rectangles
+        # Clamp indices to valid range to avoid negative indices or out-of-bounds
+        y_start = max(0, box[1] - extra_pixels_y)
+        y_end = min(ROI_img.shape[0], box[1] + box[3] + extra_pixels_y + 1)
+        x_start = max(0, box[0] + dx * part - extra_pixels_x)
+        x_end = min(ROI_img.shape[1], dx * (part + 1) + extra_pixels_x + 1)
+
+        sub_img = ROI_img[y_start:y_end, x_start:x_end, :]
+        sub_img = np.flip(sub_img, axis=0)
+        sub_img = np.flip(sub_img, axis=1)
+        digits.append(sub_img)
+
+    return digits, rectangles
 
 # resize sub-image with optional padding
 def resize_image(img, size=(28,28),PAD = 0):
@@ -3531,6 +3716,12 @@ def resize_image(img, size=(28,28),PAD = 0):
     interpolation = cv2.INTER_LINEAR
     size = size[0]-PAD,size[1]-PAD
     h, w = img.shape[:2]
+
+    # Guard against zero-width or zero-height images
+    if w == 0 or h == 0:
+        # Return blank image of target size
+        return np.zeros((size[0], size[1], 3), dtype=np.uint8)
+
     aspect_ratio = h/w
     new_aspect_ratio = size[0]/size[1]
 
@@ -3560,26 +3751,49 @@ def resize_image(img, size=(28,28),PAD = 0):
     return new_im
 
 # feed processed images to the predictor model
-prev_boxes = []
 predictor_model = None
 
-def predict_digit(frame,ROI,use_prev_box,use_detection,DEBUG=False):
-    global prev_boxes,predictor_model
+def predict_digit(frame,ROI):
+    global predictor_model
     if predictor_model is None:
         return None,None,None,None
-    frame_digits, prev_boxes, rectangles = image_preprocessor(frame,ROI,use_prev_box,use_detection,prev_boxes=prev_boxes)
+
+    frame_digits, rectangles = image_preprocessor(frame,ROI)
+
     if len(frame_digits) != ROI[-1]:
-        print("Failed to find individual digits (found %i digits our of required %i)!" % (len(frame_digits),ROI[-1]))
+        print("Failed to find individual digits (found %i digits out of required %i)!" % (len(frame_digits),ROI[-1]))
         return None,None,None,None
+
     if USE_PIL_IMAGE:
         frame_digits = [Image.fromarray(x.astype('uint8'), 'RGB') for x in frame_digits]
     else:
         raw_frame_digits = [resize_image(x, IMG_SIZE) for x in frame_digits]
-        frame_digits = np.stack(raw_frame_digits, axis=0).astype(np.float32) / 255.0
-    digits,prob = predictor_model.predict(frame_digits)
-    prob = np.prod(prob)
-    #digits = np.argmax(digits, 1)
-    #digits[digits == 10] = -1
+        frame_digits = np.stack(raw_frame_digits, axis=0, dtype=np.float32)
+        frame_digits *= (1.0 / 255.0)  # In-place normalization
+
+    # Check if we should use new entropy-based confidence method
+    use_calibrated_confidence = config_data.getboolean("main", "use_calibrated_confidence", fallback=False)
+
+    if use_calibrated_confidence and config_data.get("main", "model_type") == 'pytorch':
+        # NEW METHOD: Entropy-based calibrated confidence for PyTorch models
+        # Get full softmax distribution for entropy computation
+        digits, softmax_probs = predictor_model.predict_with_distribution(frame_digits)
+
+        # Compute calibrated per-digit confidence using entropy
+        digit_confidences = compute_calibrated_confidence(softmax_probs, entropy_weight=0.5)
+
+        # Aggregate using geometric mean (less sensitive than product)
+        prob = np.prod(digit_confidences) ** (1.0 / len(digit_confidences))
+
+        # Apply minimum threshold per digit
+        min_digit_confidence = np.min(digit_confidences)
+        if min_digit_confidence < 0.30:
+            # At least one digit has very low confidence - reject prediction
+            return None, None, None, None
+    else:
+        # OLD METHOD: Original simple approach (default for backward compatibility)
+        digits, prob = predictor_model.predict(frame_digits)
+        prob = np.prod(prob)
 
     return digits,prob,rectangles,frame_digits
 

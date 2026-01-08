@@ -68,6 +68,23 @@ class Network(nn.Module):
         output = self.label_encoder.inverse_transform(output.cpu())
         return output,prob.detach().cpu().numpy()
 
+    def predict_with_distribution(self, input):
+        """Predict digits and return full softmax distribution for confidence computation."""
+        input = self.preprocess(input)
+        input = self.scaling(input)
+        input = Variable(input.to(self.device))
+        output = self.features(input)
+        output = self.classifier(output)
+
+        # Get full softmax distribution
+        softmax_probs = torch.nn.functional.softmax(output, dim=1)
+
+        # Get predicted class
+        _, output = torch.max(output.data, 1)
+        output = self.label_encoder.inverse_transform(output.cpu())
+
+        return output, softmax_probs.detach().cpu().numpy()
+
     def forward(self, input):
         input = self.preprocess(input)
         input = self.scaling(input)
