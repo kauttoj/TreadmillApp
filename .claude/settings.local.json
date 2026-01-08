@@ -2,7 +2,18 @@
   "permissions": {
     "allow": [
       "Bash(dir:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(startup.bat)",
+      "Bash(cmd /c startup.bat)",
+      "Bash(C:/code/TreadmillApp/.venv/Scripts/python.exe:*)",
+      "Bash(cat:*)",
+      "Bash(cmd /c type C:UsersADMINI~1AppDataLocalTempclaudec--code-TreadmillApptasksb1f41a7.output)",
+      "Bash(timeout /t 3)",
+      "Bash(ping:*)",
+      "Bash(cmd /c type:*)",
+      "Bash(tasklist:*)",
+      "Bash(findstr:*)",
+      "Bash(cmd /c dir c:codeTreadmillAppTreadmillApp.py)"
     ]
   }
 }

@@ -2,3 +2,5 @@ media/
 /__pycache__
 UPGRADE_PLAN.md
 .venv
+/templates
+/videos

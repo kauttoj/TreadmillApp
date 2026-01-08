@@ -87,7 +87,7 @@ white = QColor(255, 255, 255)
 
 # FOR DEBUGGING AND DEVELOPMENT
 import matplotlib.pyplot as plt
-WEBCAM_VIDEO = "" # r"C:\Users\janne\Desktop\TreadmillApp\mydata\WIN_20210713_20_33_27_Pro.mp4"
+WEBCAM_VIDEO = r"C:\code\TreadmillApp\videos\Video 4.wmv"
 DEBUG_SPEED_OVERRIDE = None #13
 LOAD_MODEL = True # set false for faster loading in debugging
 
@@ -464,7 +464,7 @@ class ROIMatcher:
             return False
 
         # Check maximum size (shouldn't be more than half the frame)
-        if roi_width > width * 0.5 or roi_height > height * 0.5:
+        if roi_width > width * 0.75 or roi_height > height * 0.75:
             print(f"ROI rejected: too large {roi_width}x{roi_height}")
             return False
 
@@ -860,13 +860,10 @@ class TemplateCaptureDialog(QDialog):
         elif self.state == self.STATE_PREVIEW:
             self.draw_preview_state(display_img)
 
-        # Convert BGR to RGB for Qt
-        display_img = cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB)
-
-        # Convert to QPixmap
+        # Convert to QPixmap (same method as main camera display)
         height, width = display_img.shape[:2]
         bytes_per_line = 3 * width
-        q_img = QImage(display_img.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        q_img = QImage(display_img.data.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
         pixmap = QPixmap.fromImage(q_img)
 
         # Scale to fit label while maintaining aspect ratio
@@ -1481,276 +1478,93 @@ class VideoWindow(QMainWindow):
                 self.setWindowState(Qt.WindowNoState)
 
 # this is the main window that contains list of videos and webcam stream
-class MainWindow(QDialog):
+class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setupUi()
 
-    def setupUi(self):
+        # Window setup
+        self.setWindowTitle("TreadmillApp")
+        self.setMinimumSize(1000, 600)
 
-        SCALE_UI = 1.30  # Change this value to adjust the scaling
-
-        myGUI = self
-        myGUI.setObjectName("myGUI")
-        myGUI.resize(int(875 * SCALE_UI), int(461 * SCALE_UI))
-        myGUI.setMaximumWidth(myGUI.width())
-        myGUI.setMaximumHeight(myGUI.height())
-
-        self.precision_group = QtWidgets.QButtonGroup(myGUI)
-        self.precision0 = QtWidgets.QRadioButton(myGUI)
-        self.precision0.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(280 * SCALE_UI), int(41 * SCALE_UI), int(31 * SCALE_UI)))
-        self.precision0.setObjectName("precision0")
-        self.precision1 = QtWidgets.QRadioButton(myGUI)
-        self.precision1.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(310 * SCALE_UI), int(41 * SCALE_UI), int(17 * SCALE_UI)))
-        self.precision1.setObjectName("precision1")
-        self.precision2 = QtWidgets.QRadioButton(myGUI)
-        self.precision2.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(330 * SCALE_UI), int(41 * SCALE_UI), int(17 * SCALE_UI)))
-        self.precision2.setObjectName("precision2")
-        self.precision3 = QtWidgets.QRadioButton(myGUI)
-        self.precision3.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(350 * SCALE_UI), int(41 * SCALE_UI), int(17 * SCALE_UI)))
-        self.precision3.setObjectName("precision3")
-
-        self.zoomlevel = QtWidgets.QSlider(Qt.Horizontal, myGUI)
-        self.zoomlevel.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(373 * SCALE_UI), int(41 * SCALE_UI), int(16 * SCALE_UI)))
-        self.zoomlevel.setMinimum(1)
-        self.zoomlevel.setMaximum(3)
-        self.zoomlevel.setValue(int(float(config_data.get("main", "zoom_level"))))
-        self.zoomlevel.setSingleStep(1)
-        self.zoomlevel.setTickInterval(1)
-        self.zoomlevel.setObjectName("zoomlevel")
-        self.zoomlevel.valueChanged.connect(self.zoom_level_changed)
-
-        self.label_zoom = QtWidgets.QLabel(myGUI)
-        self.label_zoom.setGeometry(QtCore.QRect(int(770 * SCALE_UI), int(373 * SCALE_UI), int(35 * SCALE_UI), int(16 * SCALE_UI)))
-        self.label_zoom.setObjectName("label_zoom")
-
-        self.precision1.setChecked(1)
-        self.precision_group.addButton(self.precision0, 0)
-        self.precision_group.addButton(self.precision1, 1)
-        self.precision_group.addButton(self.precision2, 2)
-        self.precision_group.addButton(self.precision3, 3)
-        self.precision_group.buttonClicked.connect(self.precision_event)
-
-        self.digitcount_group = QtWidgets.QButtonGroup(myGUI)
-        self.digitcount2 = QtWidgets.QRadioButton(myGUI)
-        self.digitcount2.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(170 * SCALE_UI), int(41 * SCALE_UI), int(17 * SCALE_UI)))
-        self.digitcount2.setObjectName("digitcount2")
-        self.digitcount4 = QtWidgets.QRadioButton(myGUI)
-        self.digitcount4.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(210 * SCALE_UI), int(41 * SCALE_UI), int(17 * SCALE_UI)))
-        self.digitcount4.setObjectName("digitcount4")
-        self.digitcount5 = QtWidgets.QRadioButton(myGUI)
-        self.digitcount5.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(230 * SCALE_UI), int(41 * SCALE_UI), int(16 * SCALE_UI)))
-        self.digitcount5.setObjectName("digitcount5")
-        self.digitcount1 = QtWidgets.QRadioButton(myGUI)
-        self.digitcount1.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(140 * SCALE_UI), int(41 * SCALE_UI), int(31 * SCALE_UI)))
-        self.digitcount1.setObjectName("digitcount1")
-        self.digitcount3 = QtWidgets.QRadioButton(myGUI)
-        self.digitcount3.setGeometry(QtCore.QRect(int(800 * SCALE_UI), int(190 * SCALE_UI), int(41 * SCALE_UI), int(17 * SCALE_UI)))
-        self.digitcount3.setObjectName("digitcount3")
-        self.digitcount_group.buttonClicked.connect(self.digitcount_event)
-
-        self.digitcount3.setChecked(1)
-        self.digitcount_group.addButton(self.digitcount1, 1)
-        self.digitcount_group.addButton(self.digitcount2, 2)
-        self.digitcount_group.addButton(self.digitcount3, 3)
-        self.digitcount_group.addButton(self.digitcount4, 4)
-        self.digitcount_group.addButton(self.digitcount5, 5)
-
-        self.label = QtWidgets.QLabel(myGUI)
-        self.label.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(120 * SCALE_UI), int(51 * SCALE_UI), int(20 * SCALE_UI)))
-        self.label.setObjectName("label")
-        self.label_2 = QtWidgets.QLabel(myGUI)
-        self.label_2.setGeometry(QtCore.QRect(int(790 * SCALE_UI), int(260 * SCALE_UI), int(51 * SCALE_UI), int(20 * SCALE_UI)))
-        self.label_2.setObjectName("label_2")
-
-        self.regionselection = QtWidgets.QLabel(myGUI)
-        self.regionselection.setGeometry(QtCore.QRect(int(500 * SCALE_UI), int(70 * SCALE_UI), int(150 * SCALE_UI), int(20 * SCALE_UI)))
-        self.regionselection.setObjectName("regionselection")
-        self.regionselection.setText("No ROI selected")
-
-        self.lcdNumber = QtWidgets.QLCDNumber(myGUI)
-        self.lcdNumber.setGeometry(QtCore.QRect(int(630 * SCALE_UI), int(15 * SCALE_UI), int(131 * SCALE_UI), int(31 * SCALE_UI)))
-        self.lcdNumber.setObjectName("lcdNumber")
-        self.lcdNumber.setSegmentStyle(QtWidgets.QLCDNumber.Flat)
-        self.lcdNumber.setStyleSheet("QLCDNumber { background-color: rgb(255, 255,255);color: rgb(0,255,0);font-weight: bold;}")
-
-        self.frames_per_sec = QtWidgets.QLabel(myGUI)
-        self.frames_per_sec.setGeometry(QtCore.QRect(int(660 * SCALE_UI), int(60 * SCALE_UI), int(100 * SCALE_UI), int(28 * SCALE_UI)))
-        self.frames_per_sec.setText("0 frames/sec")
-
-        self.medianbox = QtWidgets.QCheckBox(myGUI)
-        self.medianbox.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(400 * SCALE_UI), int(81 * SCALE_UI), int(17 * SCALE_UI)))
-        self.medianbox.setTristate(False)
-        self.medianbox.setChecked(False)
-        self.medianbox.setObjectName("medianbox")
-        if int(config_data.get("main", "median_box")) == 1:
-            self.medianbox.setChecked(True)
-        else:
-            self.medianbox.setChecked(False)
-
-        self.tracking = QtWidgets.QCheckBox(myGUI)
-        self.tracking.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(25 * SCALE_UI), int(81 * SCALE_UI), int(17 * SCALE_UI)))
-        self.tracking.setTristate(False)
-        self.tracking.setChecked(True)
-        self.tracking.setObjectName("tracking")
-        self.tracking.clicked.connect(self.start_camera)
-
-        self.boxdetect = QtWidgets.QCheckBox(myGUI)
-        self.boxdetect.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(420 * SCALE_UI), int(81 * SCALE_UI), int(17 * SCALE_UI)))
-        self.boxdetect.setTristate(False)
-        self.boxdetect.setObjectName("boxdetect")
-        if int(config_data.get("main", "box_detect")) == 1:
-            self.boxdetect.setChecked(True)
-        else:
-            self.boxdetect.setChecked(False)
-
-        self.graphicsView = QtWidgets.QLabel(myGUI)
-        self.graphicsView.setGeometry(QtCore.QRect(int(335 * SCALE_UI), int(100 * SCALE_UI), int(431 * SCALE_UI), int(351 * SCALE_UI)))
-        self.graphicsView.setObjectName("graphicsView")
-
-        self.videopathEdit = QtWidgets.QTextEdit(myGUI)
-        self.videopathEdit.setGeometry(QtCore.QRect(int(90 * SCALE_UI), int(10 * SCALE_UI), int(421 * SCALE_UI), int(31 * SCALE_UI)))
-        self.videopathEdit.setObjectName("textEdit")
-        self.videopathEdit.setText(DEFAULT_PATH)
-        self.videopathEdit.textChanged.connect(self.updatefiles)
-
-        self.label_3 = QtWidgets.QLabel(myGUI)
-        self.label_3.setGeometry(QtCore.QRect(int(550 * SCALE_UI), int(20 * SCALE_UI), int(71 * SCALE_UI), int(16 * SCALE_UI)))
-        self.label_3.setObjectName("label_3")
-        self.listWidget = QtWidgets.QListWidget(myGUI)
-        self.listWidget.setGeometry(QtCore.QRect(int(20 * SCALE_UI), int(90 * SCALE_UI), int(311 * SCALE_UI), int(341 * SCALE_UI)))
-        self.listWidget.setObjectName("listWidget")
-        self.listWidget.itemClicked.connect(self.onClickedFile)
-        self.listWidget.currentItemChanged.connect(self.onClickedFile)
-
-        self.source_group = QtWidgets.QButtonGroup(myGUI)
-        self.source0 = QtWidgets.QRadioButton(myGUI)
-        self.source0.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(50 * SCALE_UI), int(71 * SCALE_UI), int(17 * SCALE_UI)))
-        self.source0.setObjectName("source0")
-        self.source1 = QtWidgets.QRadioButton(myGUI)
-        self.source1.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(70 * SCALE_UI), int(71 * SCALE_UI), int(17 * SCALE_UI)))
-        self.source1.setObjectName("source1")
-        self.source_group.addButton(self.source0, 0)
-        self.source_group.addButton(self.source1, 1)
-        self.source_group.buttonClicked.connect(self.source_event)
-        if int(config_data.get("main", "source")) == 0:
-            self.source0.setChecked(True)
-        else:
-            self.source1.setChecked(True)
-
-        # Template-based auto-detection widgets
-        self.template_label = QtWidgets.QLabel(myGUI)
-        self.template_label.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(100 * SCALE_UI), int(71 * SCALE_UI), int(16 * SCALE_UI)))
-        self.template_label.setText("Template:")
-        self.template_label.setObjectName("template_label")
-
-        self.template_combo = QtWidgets.QComboBox(myGUI)
-        self.template_combo.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(118 * SCALE_UI), int(100 * SCALE_UI), int(21 * SCALE_UI)))
-        self.template_combo.setObjectName("template_combo")
-        self.template_combo.currentIndexChanged.connect(self.on_template_changed)
-
-        self.capture_template_btn = QtWidgets.QPushButton(myGUI)
-        self.capture_template_btn.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(142 * SCALE_UI), int(70 * SCALE_UI), int(23 * SCALE_UI)))
-        self.capture_template_btn.setText("Capture")
-        self.capture_template_btn.setStyleSheet("background-color: orange; color: white; font-weight: bold;")
-        self.capture_template_btn.setObjectName("capture_template_btn")
-        self.capture_template_btn.clicked.connect(self.capture_template)
-
-        self.auto_calibrate_btn = QtWidgets.QPushButton(myGUI)
-        self.auto_calibrate_btn.setGeometry(QtCore.QRect(int(780 * SCALE_UI), int(168 * SCALE_UI), int(70 * SCALE_UI), int(23 * SCALE_UI)))
-        self.auto_calibrate_btn.setText("Auto-Cal")
-        self.auto_calibrate_btn.setStyleSheet("background-color: orange; color: white; font-weight: bold;")
-        self.auto_calibrate_btn.setObjectName("auto_calibrate_btn")
-        self.auto_calibrate_btn.clicked.connect(self.auto_calibrate_roi)
-
-        self.label_4 = QtWidgets.QLabel(myGUI)
-        self.label_4.setGeometry(QtCore.QRect(int(20 * SCALE_UI), int(10 * SCALE_UI), int(71 * SCALE_UI), int(16 * SCALE_UI)))
-        self.label_4.setObjectName("label_4")
-        self.playButton = QtWidgets.QPushButton(myGUI)
-        self.playButton.setGeometry(QtCore.QRect(int(410 * SCALE_UI), int(60 * SCALE_UI), int(75 * SCALE_UI), int(23 * SCALE_UI)))  # left, top, width and height
-        self.playButton.setObjectName("play")
-        self.playButton.clicked.connect(self.play_movie)
-        self.playButton.setEnabled(False)
-
-        self.videospeedEdit = QtWidgets.QTextEdit(myGUI)
-        self.videospeedEdit.setGeometry(QtCore.QRect(int(333 * SCALE_UI), int(60 * SCALE_UI), int(45 * SCALE_UI), int(23 * SCALE_UI)))
-        self.videospeedEdit.setObjectName("videospeed")
-        self.videospeedEdit.setText("")
-        self.videospeedEdit.textChanged.connect(self.edited_speed)
-        self.videospeedEdit.setEnabled(False)
-
-        self.scoregoodbutton = QtWidgets.QPushButton(myGUI)
-        self.scoregoodbutton.setGeometry(QtCore.QRect(int(380 * SCALE_UI), int(50 * SCALE_UI), int(25 * SCALE_UI), int(23 * SCALE_UI)))
-        self.scoregoodbutton.setObjectName("scorebutton_good")
-        self.scoregoodbutton.setText("")
-        self.scoregoodbutton.setStyleSheet("background-color: white;")
-        self.scoregoodbutton.clicked.connect(self.on_click_button_good)
-        self.scoregoodbutton.setEnabled(False)
-
-        self.scorebadbutton = QtWidgets.QPushButton(myGUI)
-        self.scorebadbutton.setGeometry(QtCore.QRect(int(380 * SCALE_UI), int(75 * SCALE_UI), int(25 * SCALE_UI), int(23 * SCALE_UI)))
-        self.scorebadbutton.setObjectName("scorebutton_bad")
-        self.scorebadbutton.setText("")
-        self.scorebadbutton.setStyleSheet("background-color: white;")
-        self.scorebadbutton.clicked.connect(self.on_click_button_bad)
-        self.scorebadbutton.setEnabled(False)
-        #self.scoregoodEdit.textChanged.connect(self.edited_speed)
-        #self.scoregoodEdit.setEnabled(False)
-
-        self.currentvideoEdit = QtWidgets.QPlainTextEdit(myGUI)
-        self.currentvideoEdit.setGeometry(QtCore.QRect(int(20 * SCALE_UI), int(60 * SCALE_UI), int(311 * SCALE_UI), int(21 * SCALE_UI)))
-        self.currentvideoEdit.setObjectName("plainTextEdit")
-        self.currentvideoEdit.setReadOnly(True)
-
+        # State variables - mouse and ROI tracking
         self.mouse_pos = None
+        self.selected_ROI = False
+        self.coordinate1 = None
+        self.coordinate2 = None
+        self.roi_in_frame_space = False  # True if ROI coordinates are already in frame space (from auto-cal)
 
-        try:
-            x1,y1,x2,y2,scale = [int(x) for x in config_data.get("main", "roi").split(",")]
-            assert abs(x1-x2)>2 and abs(y1-y2)>2,"Bad ROI in config!"
-            self.coordinate1 = (x1,y1,scale)
-            self.coordinate2 = (x2,y2,scale)
-            self.selected_ROI = True
-            print("predefined ROI loaded")
-        except:
-            self.selected_ROI = False
-            self.coordinate1 = None
-            self.coordinate2 = None
-
+        # Frame processing state
         self.frame_shape = None
         self.frame_scaling = None
 
-        self.retranslateUi(myGUI)
-        QtCore.QMetaObject.connectSlotsByName(myGUI)
-
+        # File management
         self.filelist = None
-        self.updatefiles()
-        self.chosen_file=None
+        self.chosen_file = None
 
+        # Camera threading
         self.camera_thread = None
-        myGUI.setMouseTracking(True)
+        self.latest_full_frame = None  # Store latest unzoomed frame for template capture
+        self.show_overlay = False  # Flag to show template overlay instead of live feed
+        self.overlay_pixmap = None  # Pixmap to display during overlay mode
+        self.overlay_success_message = None  # Message to show after overlay
 
-        self.digitcount=3
-        self.set_running_speed(current_running_speed)
-        self.precision=1
-        self.videowindow=None
+        # Speed tracking
+        self.digitcount = 3
+        self.precision = 1
+        self.defaultspeed = DEFAULT_SPEED
         self.starttime = time.time()
-        self.defaultspeed=DEFAULT_SPEED
+
+        # Video window reference
+        self.videowindow = None
+
+        # Frame shift state (for manual adjustment)
+        self.frame_shift_x = int(float(config_data.get("main", "shift_center_x", fallback="0")))
+        self.frame_shift_y = int(float(config_data.get("main", "shift_center_y", fallback="0")))
+        self.frame_shift_step = 10  # Pixels per button press
+
+        # Debounced config save timer (prevents UI blocking on rapid button presses)
+        self.config_save_timer = QTimer()
+        self.config_save_timer.setSingleShot(True)
+        self.config_save_timer.setInterval(500)  # Save 500ms after last change
+        self.config_save_timer.timeout.connect(self.save_configs)
 
         # Initialize template system for auto-detection
         print("Initializing template system...")
         self.template_manager = TemplateManager()
         self.roi_matcher = ROIMatcher()
 
-        # Populate template dropdown
-        self.update_template_list()
+        # Load predefined ROI from config if available
+        try:
+            roi_parts = config_data.get("main", "roi").split(",")
+            x1, y1, x2, y2, scale = [int(x) for x in roi_parts[:5]]
+            # Check for 6th parameter (roi_in_frame_space flag) for backward compatibility
+            if len(roi_parts) >= 6:
+                try:
+                    self.roi_in_frame_space = bool(int(roi_parts[5].strip()))
+                except:
+                    self.roi_in_frame_space = False  # Default if parsing fails
+            else:
+                self.roi_in_frame_space = False  # Default to view space for old configs
 
-        # Set active template from config
-        active_template = config_data.get("template", "active_template", fallback="default")
-        index = self.template_combo.findText(active_template)
-        if index >= 0:
-            self.template_combo.setCurrentIndex(index)
+            assert abs(x1-x2) > 2 and abs(y1-y2) > 2, "Bad ROI in config!"
+            self.coordinate1 = (x1, y1, scale)
+            self.coordinate2 = (x2, y2, scale)
+            self.selected_ROI = True
+            print(f"Predefined ROI loaded (frame_space={self.roi_in_frame_space})")
+        except Exception as e:
+            print(f"No valid ROI in config: {e}")
 
+        # Build UI
+        self.setupUi()
+
+        # Load configuration into UI widgets
+        self.load_config()
+
+        # Update file list
+        self.updatefiles()
+
+        # Start camera
         self.start_camera()
 
         # Schedule startup auto-calibration (1 second delay to allow camera init)
@@ -1758,7 +1572,741 @@ class MainWindow(QDialog):
         if auto_cal.lower() == "true" and self.template_combo.currentText() != "(no templates)":
             QTimer.singleShot(1000, self.auto_calibrate_on_startup)
 
+        # Set initial speed
+        self.set_running_speed(current_running_speed)
+
         self.show()
+
+    def setupUi(self):
+        """Main UI setup - coordinates sub-methods."""
+        # Create central widget and main layout
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+
+        self.main_layout = QHBoxLayout(self.central_widget)
+        self.main_layout.setContentsMargins(10, 10, 10, 10)
+        self.main_layout.setSpacing(10)
+
+        # Build panels
+        self.left_panel = self.build_left_panel()
+        self.right_panel = self.build_right_panel()
+
+        # Add to main layout with stretch factors
+        self.main_layout.addWidget(self.left_panel, stretch=0)  # Fixed width
+        self.main_layout.addWidget(self.right_panel, stretch=1)  # Expanding
+
+        # Enable mouse tracking for ROI selection
+        self.setMouseTracking(True)
+
+        # Populate template dropdown
+        self.update_template_list()
+
+        # Apply styling
+        self.apply_styling()
+
+        # Connect signals
+        self.connect_signals()
+
+    def build_left_panel(self):
+        """Build left panel with video library and controls."""
+        panel = QWidget()
+        panel.setMinimumWidth(350)
+        panel.setMaximumWidth(400)
+
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(10)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Video Library Group
+        library_group = QGroupBox("Video Library")
+        library_layout = QVBoxLayout()
+
+        # Path row
+        path_row = QHBoxLayout()
+        path_label = QLabel("Path:")
+        self.videopathEdit = QLineEdit()
+        self.videopathEdit.setText(config_data.get("paths", "video_path", fallback=DEFAULT_PATH))
+        browse_btn = QPushButton("...")
+        browse_btn.setMaximumWidth(30)
+        browse_btn.clicked.connect(self.browse_video_path)
+
+        path_row.addWidget(path_label)
+        path_row.addWidget(self.videopathEdit, stretch=1)
+        path_row.addWidget(browse_btn)
+
+        # Current video label
+        self.currentvideoEdit = QLabel("")
+        self.currentvideoEdit.setWordWrap(True)
+        self.currentvideoEdit.setStyleSheet("font-size: 11px; color: #666; padding: 5px;")
+        self.currentvideoEdit.setFixedHeight(30)
+
+        library_layout.addLayout(path_row)
+        library_layout.addWidget(self.currentvideoEdit)
+        library_group.setLayout(library_layout)
+
+        # Video list
+        self.listWidget = QListWidget()
+        self.listWidget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+
+        # Video controls group
+        controls_group = self.build_video_controls()
+
+        # Add to panel layout
+        layout.addWidget(library_group)
+        layout.addWidget(self.listWidget, stretch=1)  # Expanding
+        layout.addWidget(controls_group)
+
+        return panel
+
+    def build_video_controls(self):
+        """Build video controls section."""
+        group = QGroupBox("Video Controls")
+        layout = QVBoxLayout()
+
+        # Speed row
+        speed_row = QHBoxLayout()
+        speed_label = QLabel("Speed (km/h):")
+        self.speedInput = QDoubleSpinBox()
+        self.speedInput.setRange(1.0, 30.0)
+        self.speedInput.setSingleStep(0.1)
+        self.speedInput.setValue(DEFAULT_SPEED)
+        self.speedInput.setSuffix(" km/h")
+
+        speed_row.addWidget(speed_label)
+        speed_row.addWidget(self.speedInput, stretch=1)
+
+        # Rating row
+        rating_row = QHBoxLayout()
+        rating_label = QLabel("Rating:")
+        self.scoregoodbutton = QPushButton("✓")
+        self.scoregoodbutton.setObjectName("goodButton")
+        self.scoregoodbutton.setMaximumWidth(40)
+        self.scoregoodbutton.setEnabled(False)
+
+        self.scorebadbutton = QPushButton("✗")
+        self.scorebadbutton.setObjectName("badButton")
+        self.scorebadbutton.setMaximumWidth(40)
+        self.scorebadbutton.setEnabled(False)
+
+        rating_row.addWidget(rating_label)
+        rating_row.addWidget(self.scoregoodbutton)
+        rating_row.addWidget(self.scorebadbutton)
+        rating_row.addStretch()
+
+        # Play button
+        self.playButton = QPushButton("Play Video")
+        self.playButton.setObjectName("playButton")
+        self.playButton.setMinimumHeight(40)
+        self.playButton.setEnabled(False)
+
+        layout.addLayout(speed_row)
+        layout.addLayout(rating_row)
+        layout.addWidget(self.playButton)
+
+        group.setLayout(layout)
+        return group
+
+    def browse_video_path(self):
+        """Open file dialog to browse for video directory."""
+        from PyQt5.QtWidgets import QFileDialog
+        directory = QFileDialog.getExistingDirectory(self, "Select Video Directory", self.videopathEdit.text())
+        if directory:
+            self.videopathEdit.setText(directory)
+            config_data["paths"]["video_path"] = directory
+            self.save_configs()
+
+    def build_right_panel(self):
+        """Build right panel with camera, speed, and settings."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(10)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Camera group (gets most space)
+        camera_group = self.build_camera_group()
+
+        # Speed group (fixed height)
+        speed_group = self.build_speed_group()
+
+        # Settings group (fixed height)
+        settings_group = self.build_settings_group()
+
+        # Add to layout with stretch factors
+        layout.addWidget(camera_group, stretch=2)  # Gets 2/3 of vertical space
+        layout.addWidget(speed_group, stretch=0)   # Fixed ~150px
+        layout.addWidget(settings_group, stretch=0) # Fixed ~200px
+
+        return panel
+
+    def build_camera_group(self):
+        """Build camera feed section with new frame shift controls."""
+        group = QGroupBox("Camera Feed")
+        layout = QVBoxLayout()
+
+        # Camera view (expanding)
+        self.graphicsView = QLabel()
+        self.graphicsView.setObjectName("cameraView")
+        self.graphicsView.setMinimumSize(500, 400)
+        self.graphicsView.setMaximumHeight(800)  # Prevent vertical expansion over buttons
+        self.graphicsView.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.graphicsView.setAlignment(Qt.AlignCenter)
+        self.graphicsView.setStyleSheet("background-color: black; border: 2px solid #ccc;")
+        self.graphicsView.setScaledContents(False)
+
+        # Frame shift controls (NEW FEATURE)
+        shift_controls = self.build_frame_shift_controls()
+
+        # Camera controls
+        camera_controls = self.build_camera_controls()
+
+        layout.addWidget(self.graphicsView, stretch=1)
+        layout.addWidget(shift_controls)
+        layout.addLayout(camera_controls)
+
+        group.setLayout(layout)
+        return group
+
+    def build_frame_shift_controls(self):
+        """Build frame shift control buttons (NEW FEATURE)."""
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 5, 0, 5)
+
+        # Label
+        shift_label = QLabel("Frame Shift:")
+        layout.addWidget(shift_label)
+
+        # Arrow buttons
+        self.shiftLeftBtn = QPushButton("◄")
+        self.shiftLeftBtn.setObjectName("shiftBtn")
+        self.shiftLeftBtn.setMaximumWidth(30)
+        self.shiftLeftBtn.setMaximumHeight(30)
+        self.shiftLeftBtn.setToolTip("Shift frame left by 10 pixels")
+
+        self.shiftRightBtn = QPushButton("►")
+        self.shiftRightBtn.setObjectName("shiftBtn")
+        self.shiftRightBtn.setMaximumWidth(30)
+        self.shiftRightBtn.setMaximumHeight(30)
+        self.shiftRightBtn.setToolTip("Shift frame right by 10 pixels")
+
+        self.shiftUpBtn = QPushButton("▲")
+        self.shiftUpBtn.setObjectName("shiftBtn")
+        self.shiftUpBtn.setMaximumWidth(30)
+        self.shiftUpBtn.setMaximumHeight(30)
+        self.shiftUpBtn.setToolTip("Shift frame up by 10 pixels")
+
+        self.shiftDownBtn = QPushButton("▼")
+        self.shiftDownBtn.setObjectName("shiftBtn")
+        self.shiftDownBtn.setMaximumWidth(30)
+        self.shiftDownBtn.setMaximumHeight(30)
+        self.shiftDownBtn.setToolTip("Shift frame down by 10 pixels")
+
+        # Reset button
+        self.shiftResetBtn = QPushButton("Reset")
+        self.shiftResetBtn.setObjectName("shiftResetBtn")
+        self.shiftResetBtn.setMaximumWidth(60)
+        self.shiftResetBtn.setToolTip("Reset frame shift to center (0, 0)")
+
+        # Status label
+        self.shiftStatusLabel = QLabel(f"X: {self.frame_shift_x}, Y: {self.frame_shift_y}")
+        self.shiftStatusLabel.setStyleSheet("font-size: 12px; color: #000; font-weight: bold; padding: 2px;")
+
+        layout.addWidget(self.shiftLeftBtn)
+        layout.addWidget(self.shiftRightBtn)
+        layout.addWidget(self.shiftUpBtn)
+        layout.addWidget(self.shiftDownBtn)
+        layout.addWidget(self.shiftResetBtn)
+        layout.addStretch()
+        layout.addWidget(self.shiftStatusLabel)
+
+        return widget
+
+    def build_camera_controls(self):
+        """Build camera control row."""
+        layout = QHBoxLayout()
+
+        # Source selection
+        source_label = QLabel("Source:")
+        self.sourceCombo = QComboBox()
+        self.sourceCombo.addItem("Camera 0")
+        self.sourceCombo.addItem("Camera 1")
+        current_source = int(config_data.get("main", "source", fallback="0"))
+        self.sourceCombo.setCurrentIndex(current_source)
+
+        # Tracking checkbox
+        self.tracking = QCheckBox("Tracking")
+        self.tracking.setChecked(True)
+
+        # Template controls
+        template_label = QLabel("Template:")
+        self.template_combo = QComboBox()
+        self.template_combo.setObjectName("template_combo")
+
+        self.capture_template_btn = QPushButton("Capture")
+        self.capture_template_btn.setObjectName("captureTemplateBtn")
+
+        self.auto_calibrate_btn = QPushButton("Auto-Cal")
+        self.auto_calibrate_btn.setObjectName("autoCalibrateBtn")
+
+        layout.addWidget(source_label)
+        layout.addWidget(self.sourceCombo)
+        layout.addWidget(self.tracking)
+        layout.addStretch()
+        layout.addWidget(template_label)
+        layout.addWidget(self.template_combo)
+        layout.addWidget(self.capture_template_btn)
+        layout.addWidget(self.auto_calibrate_btn)
+
+        return layout
+
+    def build_speed_group(self):
+        """Build speed display section."""
+        group = QGroupBox("Speed Display")
+        layout = QVBoxLayout()
+
+        # LCD number
+        self.lcdNumber = QLCDNumber()
+        self.lcdNumber.setDigitCount(4)  # digit_count + 1
+        self.lcdNumber.setMinimumHeight(50)
+        self.lcdNumber.setSegmentStyle(QLCDNumber.Flat)
+        self.lcdNumber.setStyleSheet("""
+            QLCDNumber {
+                background-color: #1e1e1e;
+                color: #00ff00;
+                border: 2px solid #333;
+                border-radius: 4px;
+            }
+        """)
+
+        # Info row
+        info_row = QHBoxLayout()
+        self.frames_per_sec = QLabel("FPS: --")
+        self.frames_per_sec.setStyleSheet("font-size: 11px; color: #666;")
+
+        self.regionselection = QLabel("ROI: Not Set")
+        self.regionselection.setStyleSheet("font-size: 11px; color: #666;")
+
+        info_row.addWidget(self.frames_per_sec)
+        info_row.addStretch()
+        info_row.addWidget(self.regionselection)
+
+        # Confidence progress bar (NEW)
+        self.confidenceBar = QProgressBar()
+        self.confidenceBar.setRange(0, 100)
+        self.confidenceBar.setValue(0)
+        self.confidenceBar.setFormat("Match Confidence: %p%")
+        self.confidenceBar.setTextVisible(True)
+        self.confidenceBar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                text-align: center;
+                background-color: white;
+            }
+            QProgressBar::chunk {
+                background-color: #4CAF50;
+            }
+        """)
+
+        layout.addWidget(self.lcdNumber)
+        layout.addLayout(info_row)
+        layout.addWidget(self.confidenceBar)
+
+        group.setLayout(layout)
+        return group
+
+    def build_settings_group(self):
+        """Build settings section (all visible, no collapsing)."""
+        group = QGroupBox("Settings")
+        layout = QFormLayout()
+        layout.setSpacing(8)
+
+        # Digit count
+        self.digitCountSpin = QSpinBox()
+        self.digitCountSpin.setRange(1, 5)
+        self.digitCountSpin.setValue(3)
+        layout.addRow("Digit Count:", self.digitCountSpin)
+
+        # Precision
+        self.precisionSpin = QSpinBox()
+        self.precisionSpin.setRange(0, 3)
+        self.precisionSpin.setValue(1)
+        layout.addRow("Precision:", self.precisionSpin)
+
+        # Zoom level
+        self.zoomlevel = QSlider(Qt.Horizontal)
+        self.zoomlevel.setRange(1, 3)
+        self.zoomlevel.setValue(1)
+        self.zoomlevel.setTickPosition(QSlider.TicksBelow)
+        self.zoomlevel.setTickInterval(1)
+        layout.addRow("Zoom Level:", self.zoomlevel)
+
+        group.setLayout(layout)
+        return group
+
+    def shift_frame_left(self):
+        """Shift frame left by step pixels."""
+        self.frame_shift_x -= self.frame_shift_step
+        self.update_frame_shift()
+
+    def shift_frame_right(self):
+        """Shift frame right by step pixels."""
+        self.frame_shift_x += self.frame_shift_step
+        self.update_frame_shift()
+
+    def shift_frame_up(self):
+        """Shift frame up by step pixels."""
+        self.frame_shift_y -= self.frame_shift_step
+        self.update_frame_shift()
+
+    def shift_frame_down(self):
+        """Shift frame down by step pixels."""
+        self.frame_shift_y += self.frame_shift_step
+        self.update_frame_shift()
+
+    def reset_frame_shift(self):
+        """Reset frame shift to center (0, 0)."""
+        self.frame_shift_x = 0
+        self.frame_shift_y = 0
+        self.update_frame_shift()
+
+    def update_frame_shift(self):
+        """Update status label and apply shift to frame processing."""
+        self.shiftStatusLabel.setText(f"X: {self.frame_shift_x}, Y: {self.frame_shift_y}")
+
+        # Update config (in memory)
+        config_data["main"]["shift_center_x"] = str(self.frame_shift_x)
+        config_data["main"]["shift_center_y"] = str(self.frame_shift_y)
+
+        # Schedule debounced save (prevents UI blocking on rapid button presses)
+        self.config_save_timer.stop()  # Reset timer if already running
+        self.config_save_timer.start()  # Start/restart 500ms countdown
+
+        # Update globals for camera thread (immediate effect)
+        global SHIFT_CENTER_X, SHIFT_CENTER_Y
+        SHIFT_CENTER_X = self.frame_shift_x
+        SHIFT_CENTER_Y = self.frame_shift_y
+
+    def connect_signals(self):
+        """Connect all UI signals to handler methods."""
+        # Left panel - video library
+        self.videopathEdit.textChanged.connect(self.updatefiles)
+        self.listWidget.itemClicked.connect(self.onClickedFile)
+        self.listWidget.currentItemChanged.connect(self.onClickedFile)
+
+        # Left panel - video controls
+        self.speedInput.valueChanged.connect(self.on_speed_changed)
+        self.scoregoodbutton.clicked.connect(self.on_click_button_good)
+        self.scorebadbutton.clicked.connect(self.on_click_button_bad)
+        self.playButton.clicked.connect(self.play_movie)
+
+        # Camera controls
+        self.sourceCombo.currentIndexChanged.connect(self.on_source_changed)
+        self.tracking.toggled.connect(self.on_tracking_toggled)
+        self.template_combo.currentIndexChanged.connect(self.on_template_changed)
+        self.capture_template_btn.clicked.connect(self.capture_template)
+        self.auto_calibrate_btn.clicked.connect(self.auto_calibrate_roi)
+
+        # Frame shift controls (NEW)
+        self.shiftLeftBtn.clicked.connect(self.shift_frame_left)
+        self.shiftRightBtn.clicked.connect(self.shift_frame_right)
+        self.shiftUpBtn.clicked.connect(self.shift_frame_up)
+        self.shiftDownBtn.clicked.connect(self.shift_frame_down)
+        self.shiftResetBtn.clicked.connect(self.reset_frame_shift)
+
+        # Settings
+        self.digitCountSpin.valueChanged.connect(self.on_digit_count_changed)
+        self.precisionSpin.valueChanged.connect(self.on_precision_changed)
+        self.zoomlevel.valueChanged.connect(self.zoom_level_changed)
+
+        # Mouse events on camera view
+        self.graphicsView.setMouseTracking(True)
+        self.graphicsView.mouseMoveEvent = self.mousemove
+        self.graphicsView.mousePressEvent = self.mousedown
+        self.graphicsView.mouseReleaseEvent = self.mouseup
+
+    def on_speed_changed(self, value):
+        """Handle speed input change."""
+        self.defaultspeed = value
+        config_data["main"]["default_speed"] = str(value)
+        self.save_configs()
+
+    def on_source_changed(self, index):
+        """Handle camera source change from combo box."""
+        config_data["main"]["source"] = str(index)
+        self.save_configs()
+        self.start_camera()  # Restart camera with new source
+
+    def on_tracking_toggled(self, checked):
+        """Handle tracking checkbox toggle."""
+        if checked:
+            self.start_camera()
+
+    def on_digit_count_changed(self, value):
+        """Handle digit count change from spin box."""
+        self.digitcount = value
+        print(f"Digit count changed to: {value}")
+        config_data["main"]["digit_count"] = str(value)
+        self.save_configs()
+        # Update LCD digit count
+        self.lcdNumber.setDigitCount(value + 1)
+
+    def on_precision_changed(self, value):
+        """Handle precision change from spin box."""
+        self.precision = value
+        print(f"Precision changed to: {value}")
+        config_data["main"]["precision"] = str(value)
+        self.save_configs()
+
+    def apply_styling(self):
+        """Apply modern styling to application."""
+        stylesheet = """
+        /* Main Window */
+        QMainWindow {
+            background-color: #f5f5f5;
+        }
+
+        /* Group Boxes */
+        QGroupBox {
+            background-color: white;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            margin-top: 12px;
+            padding: 15px 10px 10px 10px;
+            font-weight: bold;
+            font-size: 13px;
+            color: #333;
+        }
+
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            subcontrol-position: top left;
+            left: 10px;
+            padding: 0 5px;
+        }
+
+        /* Primary Buttons */
+        QPushButton {
+            background-color: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 8px 16px;
+            font-weight: 500;
+            font-size: 13px;
+        }
+
+        QPushButton:hover {
+            background-color: #1976D2;
+        }
+
+        QPushButton:pressed {
+            background-color: #0D47A1;
+        }
+
+        QPushButton:disabled {
+            background-color: #BDBDBD;
+            color: #757575;
+        }
+
+        /* Play Button */
+        QPushButton#playButton {
+            background-color: #4CAF50;
+            font-size: 14px;
+            font-weight: bold;
+            min-height: 40px;
+        }
+
+        QPushButton#playButton:hover {
+            background-color: #45a049;
+        }
+
+        QPushButton#playButton:disabled {
+            background-color: #A5D6A7;
+        }
+
+        /* Rating Buttons */
+        QPushButton#goodButton {
+            background-color: #4CAF50;
+            font-size: 18px;
+            max-width: 40px;
+        }
+
+        QPushButton#badButton {
+            background-color: #f44336;
+            font-size: 18px;
+            max-width: 40px;
+        }
+
+        /* Template Buttons */
+        QPushButton#captureTemplateBtn,
+        QPushButton#autoCalibrateBtn {
+            background-color: #FF9800;
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+
+        QPushButton#captureTemplateBtn:hover,
+        QPushButton#autoCalibrateBtn:hover {
+            background-color: #F57C00;
+        }
+
+        /* Frame Shift Buttons */
+        QPushButton#shiftBtn {
+            background-color: #607D8B;
+            font-size: 16px;
+            max-width: 30px;
+            max-height: 30px;
+            padding: 4px;
+        }
+
+        QPushButton#shiftResetBtn {
+            background-color: #9E9E9E;
+            max-width: 60px;
+        }
+
+        /* Input Fields */
+        QLineEdit,
+        QDoubleSpinBox,
+        QSpinBox {
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            padding: 5px;
+            background-color: white;
+            selection-background-color: #2196F3;
+        }
+
+        QLineEdit:focus,
+        QDoubleSpinBox:focus,
+        QSpinBox:focus {
+            border: 1px solid #2196F3;
+            outline: none;
+        }
+
+        /* Combo Boxes */
+        QComboBox {
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            padding: 5px;
+            background-color: white;
+            min-width: 100px;
+        }
+
+        QComboBox:hover {
+            border: 1px solid #2196F3;
+        }
+
+        /* List Widget */
+        QListWidget {
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            background-color: white;
+        }
+
+        QListWidget::item {
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+
+        QListWidget::item:selected {
+            background-color: #2196F3;
+            color: white;
+        }
+
+        QListWidget::item:hover {
+            background-color: #e3f2fd;
+        }
+
+        /* Checkboxes */
+        QCheckBox {
+            spacing: 5px;
+        }
+
+        QCheckBox::indicator {
+            width: 18px;
+            height: 18px;
+        }
+
+        /* Sliders */
+        QSlider::groove:horizontal {
+            border: 1px solid #bbb;
+            background: white;
+            height: 8px;
+            border-radius: 4px;
+        }
+
+        QSlider::handle:horizontal {
+            background: #2196F3;
+            border: 1px solid #1976D2;
+            width: 18px;
+            margin: -5px 0;
+            border-radius: 9px;
+        }
+
+        QSlider::handle:horizontal:hover {
+            background: #1976D2;
+        }
+
+        /* Camera View */
+        QLabel#cameraView {
+            background-color: black;
+            border: 2px solid #ccc;
+            border-radius: 4px;
+        }
+        """
+
+        self.setStyleSheet(stylesheet)
+
+    def resizeEvent(self, event):
+        """Handle window resize - maintain camera view aspect ratio."""
+        super().resizeEvent(event)
+
+        # Get camera view size
+        if hasattr(self, 'graphicsView'):
+            view_size = self.graphicsView.size()
+            pixmap = self.graphicsView.pixmap()
+
+            if pixmap and not pixmap.isNull():
+                # Scale pixmap to fit view while maintaining aspect ratio
+                scaled_pixmap = pixmap.scaled(
+                    view_size,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+                self.graphicsView.setPixmap(scaled_pixmap)
+
+    def load_config(self):
+        """Load configuration into UI widgets."""
+        # Video path - already loaded in build_left_panel
+
+        # Speed - already set to DEFAULT_SPEED in build_video_controls
+
+        # Digit count
+        digit_count = int(float(config_data.get("main", "digit_count", fallback="3")))
+        self.digitCountSpin.setValue(digit_count)
+        self.digitcount = digit_count
+        self.lcdNumber.setDigitCount(digit_count + 1)
+
+        # Precision
+        precision = int(float(config_data.get("main", "precision", fallback="1")))
+        self.precisionSpin.setValue(precision)
+        self.precision = precision
+
+        # Zoom
+        zoom = int(float(config_data.get("main", "zoom_level", fallback="1")))
+        self.zoomlevel.setValue(zoom)
+
+        # Set active template from config
+        active_template = config_data.get("template", "active_template", fallback="default")
+        index = self.template_combo.findText(active_template)
+        if index >= 0:
+            self.template_combo.setCurrentIndex(index)
+
+        # ROI status label
+        if self.selected_ROI:
+            self.regionselection.setText("ROI: Selected")
+        else:
+            self.regionselection.setText("ROI: Not Set")
 
     def on_click_button_good(self):
         if self.chosen_file is not None:
@@ -1789,18 +2337,6 @@ class MainWindow(QDialog):
     def set_running_speed(self,val):
         self.lcdNumber.setNumDigits(self.digitcount+1)
         self.lcdNumber.display(val)
-
-    def digitcount_event(self,e):
-        self.digitcount = self.digitcount_group.id(e)
-        print("changed digitcount to %i" % self.digitcount)
-
-    def source_event(self,e):
-        print("changed source to %i" % self.source_group.checkedId())
-        self.start_camera()
-
-    def precision_event(self,e):
-        self.precision = self.precision_group.id(e)
-        print("changed precision to %i" % self.precision)
 
     def mousemove(self,e):
         if self.frame_shape is not None:
@@ -1833,7 +2369,9 @@ class MainWindow(QDialog):
         '''
     def zoom_level_changed(self,value):
         config_data["main"]['zoom_level'] = str(value)
-        self.save_configs()
+        # Use debounced save to prevent UI blocking
+        self.config_save_timer.stop()
+        self.config_save_timer.start()
 
     def save_configs(self):
         with open(CONFIG_FILE, 'w', encoding="UTF-8") as configfile:
@@ -1853,10 +2391,14 @@ class MainWindow(QDialog):
                 self.coordinate2 = (x, y, self.zoomlevel.value())
                 print("mouse coord 2 (x, y) = (%i, %i)" % (self.coordinate2[0], self.coordinate2[1]))
                 self.selected_ROI = True
+                self.roi_in_frame_space = False  # Manual selection: coordinates are in VIEW space
                 # update config file
-                config_data["main"]["roi"] = "%i,%i,%i,%i,%i" % (
+                config_data["main"]["roi"] = "%i,%i,%i,%i,%i,%i" % (
                     self.coordinate1[0], self.coordinate1[1], self.coordinate2[0], self.coordinate2[1],
-                    self.zoomlevel.value())
+                    self.zoomlevel.value(), 0)  # 0 = view space
+
+                # Stop any pending debounced saves to prevent race conditions
+                self.config_save_timer.stop()
                 self.save_configs()
 
         # Clear drawing boxes on right mouse button click
@@ -1864,13 +2406,14 @@ class MainWindow(QDialog):
             self.selected_ROI = False
             self.coordinate1 = None
             self.coordinate2 = None
+            self.roi_in_frame_space = False
             self.regionselection.setText("No ROI selected")
 
     # begin recording
     def start_camera(self):
         global current_running_speed
         if self.tracking.isChecked():
-            device = self.source_group.checkedId()
+            device = self.sourceCombo.currentIndex()
             self.camera_thread = threading.Thread(target=self.camera_update, args=[device])
             self.camera_thread.daemon = True
             self.camera_thread.start()
@@ -1907,6 +2450,10 @@ class MainWindow(QDialog):
         zoom_multiplier = {}
         old_ROI=None
 
+        # Track shift values to detect changes and rebuild template
+        last_shift_x = SHIFT_CENTER_X
+        last_shift_y = SHIFT_CENTER_Y
+
         # convert view coordinates to actual coordinates in acquired frame. Need to take into account padding and zooming!
         def view_to_frame(coordinate1,coordinate2):
             # remove padded pixels outside frame, convert to zoom=1 scale and add cropped pixels
@@ -1928,11 +2475,13 @@ class MainWindow(QDialog):
             y2 = int(y2 * self.frame_scaling["height"])            
 
             return x1, y1, x2, y2
-
+        
+        last_event = 0
         frame_num = 0
         while True:
+            now = time.time()
             if self.capture.isOpened():
-                if self.source_group.checkedId() != old_device or not(self.tracking.isChecked()):
+                if self.sourceCombo.currentIndex() != old_device or not(self.tracking.isChecked()):
                     self.capture.release()
                     cv2.destroyAllWindows()
                     current_running_speed = self.defaultspeed
@@ -1943,14 +2492,23 @@ class MainWindow(QDialog):
                 #    frame = template_frame_real
                 #else:
                 (status, frame) = self.capture.read()
-                
+
+                if frame is None or not(isinstance(frame,np.ndarray)):
+                    if (now - last_event >= 3.0):
+                        print('obtained frame is not valid (type %s)!' % str(type(frame)))
+                    continue
+
+                # Check if shift values changed - if so, reset template
+                if SHIFT_CENTER_X != last_shift_x or SHIFT_CENTER_Y != last_shift_y:
+                    print(f"Shift changed: ({last_shift_x},{last_shift_y}) -> ({SHIFT_CENTER_X},{SHIFT_CENTER_Y}), resetting template")
+                    init_run = 0
+                    template_frame = 0
+                    last_shift_x = SHIFT_CENTER_X
+                    last_shift_y = SHIFT_CENTER_Y
+
                 #print('frame.shape = %s' % str(frame.shape))
                 frame = np.roll(frame,SHIFT_CENTER_X,axis=1)
                 frame = np.roll(frame,SHIFT_CENTER_Y,axis=0)
-
-                if frame is None or not(isinstance(frame,np.ndarray)):
-                    print('obtained frame is not valid (type %s)!' % str(type(frame)))
-                    continue
 
                 frame_num+=1
 
@@ -1995,28 +2553,37 @@ class MainWindow(QDialog):
                 else:
                     frame = register_image(template_frame,frame)
 
-                    now = time.time()
                     if self.selected_ROI:
-                        if old_ROI is None:
-                            x1,y1,x2,y2 = view_to_frame(self.coordinate1,self.coordinate2)
-                            # scale coordinated to actual frame
-                            ROI = [x1,y1,x2,y2,self.digitcount] # [x1,y1,x2,y2,digit_count]
-
-                            # (x2-x1) = width
-                            if (x2-x1)<40 or (y2-y1)<20 or (ROI[2]>frame.shape[1]) or (ROI[3]>frame.shape[0]) or (self.coordinate1[2] != self.coordinate2[2]):
-                                print("Bad ROI, resetting")
-                                self.selected_ROI = False
-                                self.coordinate1 = None
-                                self.coordinate2 = None
-                                continue
-                            print("ROI coordinates: x1=%i, y1=%i, x2=%i, y2=%i" % (x1,y1,x2,y2))
-                            old_ROI=ROI
+                        # Get ROI coordinates
+                        # Check if coordinates are already in frame space (from auto-cal) or view space (from manual click)
+                        if self.roi_in_frame_space:
+                            # Coordinates are already in frame space (from homography transform)
+                            # Use them directly without view_to_frame() transformation
+                            x1, y1, x2, y2 = self.coordinate1[0], self.coordinate1[1], self.coordinate2[0], self.coordinate2[1]
                         else:
-                            ROI = old_ROI
+                            # Coordinates are in view space (from manual click)
+                            # Need to convert to frame space
+                            x1,y1,x2,y2 = view_to_frame(self.coordinate1,self.coordinate2)
+
+                        ROI = [x1,y1,x2,y2,self.digitcount] # [x1,y1,x2,y2,digit_count]
+
+                        # Validate ROI
+                        if (x2-x1)<40 or (y2-y1)<20 or (ROI[2]>frame.shape[1]) or (ROI[3]>frame.shape[0]) or (self.coordinate1[2] != self.coordinate2[2]):
+                            print("Bad ROI, resetting")
+                            self.selected_ROI = False
+                            self.coordinate1 = None
+                            self.coordinate2 = None
+                            self.roi_in_frame_space = False
+                            continue
+
+                        # Print ROI only on first use or when it changes significantly
+                        if old_ROI is None or abs(old_ROI[0] - ROI[0]) > 10 or abs(old_ROI[1] - ROI[1]) > 10:
+                            print("ROI coordinates: x1=%i, y1=%i, x2=%i, y2=%i" % (x1,y1,x2,y2))
+                            old_ROI = ROI
 
                         # if enough time passed, analyze digits
                         if (now - last_prediction_time)*1000 > PREDICT_INTERVAL:
-                            predicted_digits,predicted_prob,rectangles,raw_frames = predict_digit(frame, ROI,self.medianbox.isChecked(),self.boxdetect.isChecked())
+                            predicted_digits,predicted_prob,rectangles,raw_frames = predict_digit(frame, ROI, False, False)
                             if predicted_digits is None:
                                 # failed, just use last valid prediction
                                 predicted_speed = current_running_speed
@@ -2074,6 +2641,9 @@ class MainWindow(QDialog):
                         rectangles = None
                         old_ROI = None
 
+                    # Store full unzoomed frame for template capture
+                    self.latest_full_frame = frame.copy()
+
                     zoom_level = self.zoomlevel.value()
                     if zoom_level > 1:
                         frame = frame[zoom_cut[zoom_level]["orig"]["height"]:-zoom_cut[zoom_level]["orig"]["height"], zoom_cut[zoom_level]["orig"]["width"]:-zoom_cut[zoom_level]["orig"]["width"], :]
@@ -2082,7 +2652,13 @@ class MainWindow(QDialog):
                     pixmap = QtGui.QPixmap.fromImage(image)
                     pixmap = pixmap.scaled(self.graphicsView.width(), self.graphicsView.height(), QtCore.Qt.KeepAspectRatio)
 
-                self.graphicsView.setPixmap(pixmap)
+                # Only update display if not showing overlay
+                if not self.show_overlay:
+                    self.graphicsView.setPixmap(pixmap)
+                else:
+                    # Keep showing the overlay
+                    if self.overlay_pixmap is not None:
+                        self.graphicsView.setPixmap(self.overlay_pixmap)
 
                 key = cv2.waitKey(1)
 
@@ -2097,7 +2673,7 @@ class MainWindow(QDialog):
 
     def updatefiles(self):
         # read all files with specific extension
-        ROOT_PATH = self.videopathEdit.toPlainText() + os.sep
+        ROOT_PATH = self.videopathEdit.text() + os.sep
         files = glob.glob(ROOT_PATH + "*.mp4")
         files += glob.glob(ROOT_PATH + "*.webm")
         files += glob.glob(ROOT_PATH + "*.mkv")
@@ -2162,9 +2738,9 @@ class MainWindow(QDialog):
     def onClickedFile(self,item=None):
         if item is None:
             item = self.currentItem()
-        self.currentvideoEdit.setPlainText(item.text())
+        self.currentvideoEdit.setText(item.text())
         self.playButton.setEnabled(True)
-        self.videospeedEdit.setEnabled(True)
+        self.speedInput.setEnabled(True)
         self.scorebadbutton.setEnabled(True)
         self.scoregoodbutton.setEnabled(True)
 
@@ -2174,7 +2750,7 @@ class MainWindow(QDialog):
         #for k,file in saved_files.items():
         #    if self.chosen_file[1] in file[0]:
         self.defaultspeed = float(selected_file["rate"])
-        self.videospeedEdit.setText(str(self.defaultspeed))
+        self.speedInput.setValue(self.defaultspeed)
 
         score = float(selected_file["score"])
         self.scoregoodbutton.setStyleSheet("background-color: white;")
@@ -2183,30 +2759,6 @@ class MainWindow(QDialog):
             self.scoregoodbutton.setStyleSheet("background-color: green;")
         if score==-1:
             self.scorebadbutton.setStyleSheet("background-color: red;")
-    def retranslateUi(self, myGUI):
-        _translate = QtCore.QCoreApplication.translate
-        myGUI.setWindowTitle(_translate("myGUI", "TreadmillApp"))
-        self.precision0.setText(_translate("myGUI", "0"))
-        self.precision1.setText(_translate("myGUI", "1"))
-        self.precision2.setText(_translate("myGUI", "2"))
-        self.precision3.setText(_translate("myGUI", "3"))
-        self.digitcount2.setText(_translate("myGUI", "2"))
-        self.digitcount4.setText(_translate("myGUI", "4"))
-        self.digitcount5.setText(_translate("myGUI", "5"))
-        self.digitcount1.setText(_translate("myGUI", "1"))
-        self.digitcount3.setText(_translate("myGUI", "3"))
-        self.label.setText(_translate("myGUI", "digit count"))
-        self.label_2.setText(_translate("myGUI", "precision"))
-        self.medianbox.setText(_translate("myGUI", "median box"))
-        self.tracking.setText(_translate("myGUI", "tracking"))
-        self.label_zoom.setText(_translate("myGUI", "zoom"))
-        self.boxdetect.setText(_translate("myGUI", "box detect"))
-        self.label_3.setText(_translate("myGUI", "current speed"))
-        self.source0.setText(_translate("myGUI", "source 0"))
-        self.source1.setText(_translate("myGUI", "source 1"))
-        self.label_4.setText(_translate("myGUI", "current path"))
-        self.playButton.setText(_translate("myGUI", "Play selected"))
-
     def update_filedata(self):
         if self.chosen_file is not None:
             old_files = {k:config_data["files"].get(k).split("|") for k in list(config_data["files"])}
@@ -2268,6 +2820,7 @@ class MainWindow(QDialog):
 
         if name and name != "(no templates)":
             config_data["template"]["active_template"] = name
+            self.config_save_timer.stop()  # Prevent race conditions
             self.save_configs()
             self.regionselection.setText(f"Template: {name}")
             print(f"Active template: {name}")
@@ -2280,25 +2833,20 @@ class MainWindow(QDialog):
                 "Wait for camera to initialize.")
             return
 
-        # Get current frame from graphicsView
-        pixmap = self.graphicsView.pixmap()
-        if pixmap is None:
+        # Get full unzoomed frame (not the zoomed display)
+        if self.latest_full_frame is None:
             QMessageBox.warning(self, "No Frame", "No webcam frame available.")
             return
 
-        # Convert QPixmap to numpy array
-        image = pixmap.toImage()
-        w, h = image.width(), image.height()
-        ptr = image.bits()
-        ptr.setsize(h * w * 4)
-        arr = np.array(ptr).reshape(h, w, 4)
-        frame_bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+        # Use the full unzoomed frame stored from camera thread
+        # Note: OpenCV VideoCapture returns BGR frames
+        frame_bgr = self.latest_full_frame.copy()
 
         # Open template capture dialog
-        camera_source = self.source_group.checkedId()
-        zoom_level = self.zoomlevel.value()
+        # Always use zoom_level=1 since we're passing the full frame
+        camera_source = self.sourceCombo.currentIndex()
 
-        dialog = TemplateCaptureDialog(self, frame_bgr, camera_source, zoom_level)
+        dialog = TemplateCaptureDialog(self, frame_bgr, camera_source, zoom_level=1)
 
         if dialog.exec_() == QDialog.Accepted:
             template_data, name = dialog.get_template_data()
@@ -2306,6 +2854,7 @@ class MainWindow(QDialog):
             # Save template
             if self.template_manager.save_template(name, template_data):
                 config_data["template"]["active_template"] = name
+                self.config_save_timer.stop()  # Prevent race conditions
                 self.save_configs()
 
                 self.update_template_list()
@@ -2317,6 +2866,112 @@ class MainWindow(QDialog):
                     f"Template '{name}' saved.\n\nClick Auto-Cal to detect ROI.")
             else:
                 QMessageBox.critical(self, "Failed", f"Failed to save '{name}'.")
+
+    def show_template_overlay(self, live_frame, template_data, roi_coords, confidence, success_message=None):
+        """
+        Display template overlaid on live frame for 2 seconds using falsecolor composite.
+        Shows in the main camera view, not a separate popup.
+
+        Args:
+            live_frame: Current webcam frame (BGR)
+            template_data: Template dictionary with 'template_image' key
+            roi_coords: Matched ROI coordinates [x1, y1, x2, y2]
+            confidence: Matching confidence (0.0 to 1.0)
+            success_message: Optional message to show after overlay (str)
+        """
+        try:
+            print("\n" + "="*60)
+            print("SHOWING TEMPLATE OVERLAY IN CAMERA VIEW")
+            print("="*60)
+
+            # Get template image
+            template_img = template_data['template_image']
+
+            # Convert both to grayscale
+            live_gray = cv2.cvtColor(live_frame, cv2.COLOR_BGR2GRAY)
+            template_gray = cv2.cvtColor(template_img, cv2.COLOR_BGR2GRAY)
+
+            # Create falsecolor composite (like MATLAB's imshowpair)
+            # DON'T draw ROI box here - it will be drawn on top later
+            falsecolor = np.zeros((live_gray.shape[0], live_gray.shape[1], 3), dtype=np.uint8)
+            falsecolor[:, :, 0] = template_gray  # Blue = template
+            falsecolor[:, :, 1] = live_gray      # Green = live frame
+            falsecolor[:, :, 2] = template_gray  # Red = template
+
+            # Add text overlay
+            cv2.rectangle(falsecolor, (5, 5), (550, 85), (0, 0, 0), -1)
+            cv2.putText(falsecolor, "TEMPLATE ALIGNMENT CHECK", (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            cv2.putText(falsecolor, "GREEN=Live | MAGENTA=Template | WHITE=Aligned", (10, 58),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(falsecolor, f"Match Confidence: {confidence:.1%}", (10, 78),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+
+            print(f"Falsecolor created: {falsecolor.shape}")
+
+            # Convert to QPixmap
+            height, width = falsecolor.shape[:2]
+            bytes_per_line = 3 * width
+            q_img = QImage(falsecolor.data.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
+            pixmap = QPixmap.fromImage(q_img)
+
+            # Scale to fit camera view
+            scaled_pixmap = pixmap.scaled(
+                self.graphicsView.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+
+            # Draw ROI box on TOP of the pixmap (not embedded in the image)
+            painter = QPainter(scaled_pixmap)
+            painter.setPen(QPen(QColor(0, 255, 255), 4))  # Yellow, 4px thick
+
+            # Calculate scaled ROI coordinates
+            scale_x = scaled_pixmap.width() / width
+            scale_y = scaled_pixmap.height() / height
+            x1, y1, x2, y2 = roi_coords
+            scaled_x1 = int(x1 * scale_x)
+            scaled_y1 = int(y1 * scale_y)
+            scaled_x2 = int(x2 * scale_x)
+            scaled_y2 = int(y2 * scale_y)
+
+            painter.drawRect(scaled_x1, scaled_y1, scaled_x2 - scaled_x1, scaled_y2 - scaled_y1)
+            painter.end()
+
+            print(f"ROI box drawn on top: ({x1},{y1},{x2},{y2})")
+
+            # Store overlay and set flag to pause camera updates
+            self.overlay_pixmap = scaled_pixmap
+            self.overlay_success_message = success_message
+            self.show_overlay = True
+
+            # Display overlay in camera view
+            self.graphicsView.setPixmap(self.overlay_pixmap)
+            self.graphicsView.update()
+            self.graphicsView.repaint()
+            QApplication.processEvents()
+
+            print("Overlay displayed in camera view for 2 seconds")
+            print("="*60 + "\n")
+
+            # Schedule overlay removal after 2 seconds
+            QTimer.singleShot(2000, self.hide_template_overlay)
+
+        except Exception as e:
+            print(f"ERROR showing template overlay: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def hide_template_overlay(self):
+        """Hide the template overlay and resume normal camera display."""
+        print("Hiding template overlay, resuming normal display")
+        self.show_overlay = False
+        self.overlay_pixmap = None
+
+        # Show success message if provided
+        if self.overlay_success_message:
+            QMessageBox.information(self, "Success", self.overlay_success_message)
+            self.overlay_success_message = None
 
     def auto_calibrate_roi(self):
         """
@@ -2337,19 +2992,13 @@ class MainWindow(QDialog):
             QMessageBox.critical(self, "Load Failed", f"Failed to load '{name}'.")
             return
 
-        # Get current frame
-        pixmap = self.graphicsView.pixmap()
-        if pixmap is None:
+        # Get full unzoomed frame (not the zoomed display)
+        # This ensures coordinates match the template coordinate system
+        if self.latest_full_frame is None:
             QMessageBox.warning(self, "No Frame", "No webcam frame available.")
             return
 
-        # Convert to numpy
-        image = pixmap.toImage()
-        w, h = image.width(), image.height()
-        ptr = image.bits()
-        ptr.setsize(h * w * 4)
-        arr = np.array(ptr).reshape(h, w, 4)
-        live_frame = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+        live_frame = self.latest_full_frame.copy()
 
         # Get threshold
         threshold = float(config_data.get("template", "confidence_threshold", fallback="0.70"))
@@ -2380,35 +3029,45 @@ class MainWindow(QDialog):
         # Success!
         x1, y1, x2, y2 = roi_coords
         digit_count = int(template_data['digit_count'])
-        zoom_level = int(template_data['zoom_level'])
 
-        # Update internal state (same as manual ROI selection)
+        # Coordinates are in full-frame space (zoom_level=1)
+        # since template was captured from full frame
+        zoom_level = 1
+
+        # Update internal state
+        # NOTE: These coordinates are already in FRAME space (transformed by homography)
+        # NOT in view space like manual selection!
         self.coordinate1 = (x1, y1, zoom_level)
         self.coordinate2 = (x2, y2, zoom_level)
         self.selected_ROI = True
+        self.roi_in_frame_space = True  # Flag: coordinates are already in frame space
         self.digitcount = digit_count
 
-        # Update digit count radio buttons
-        digit_map = {1: self.digitcount1, 2: self.digitcount2,
-                     3: self.digitcount3, 4: self.digitcount4, 5: self.digitcount5}
-        if digit_count in digit_map:
-            digit_map[digit_count].setChecked(True)
+        # Update digit count spin box
+        self.digitCountSpin.setValue(digit_count)
+        self.lcdNumber.setDigitCount(digit_count + 1)
 
         # Save to config
-        config_data["main"]["roi"] = f"{x1},{y1},{x2},{y2},{digit_count}"
+        config_data["main"]["roi"] = f"{x1},{y1},{x2},{y2},{zoom_level},1"  # 1 = frame space
+        config_data["main"]["digit_count"] = str(digit_count)
+
+        # Stop any pending debounced saves to prevent race conditions
+        self.config_save_timer.stop()
         self.save_configs()
 
         # Update UI
         self.regionselection.setText(f"Auto-cal OK ({confidence:.0%})")
         self.regionselection.setStyleSheet("color: green; font-weight: bold;")
 
-        QMessageBox.information(self, "Success",
-            f"ROI detected!\n\n"
-            f"Confidence: {confidence:.1%}\n"
-            f"ROI: ({x1}, {y1}, {x2}, {y2})\n"
-            f"Digits: {digit_count}")
-
         print(f"Auto-calibration successful: {confidence:.1%}, ROI=({x1},{y1},{x2},{y2})")
+
+        # Show template overlay for debugging (will show for 2 seconds)
+        # Success message will appear after overlay
+        success_message = (f"ROI detected!\n\n"
+                          f"Confidence: {confidence:.1%}\n"
+                          f"ROI: ({x1}, {y1}, {x2}, {y2})\n"
+                          f"Digits: {digit_count}")
+        self.show_template_overlay(live_frame, template_data, roi_coords, confidence, success_message)
 
     def auto_calibrate_on_startup(self):
         """
@@ -2431,19 +3090,12 @@ class MainWindow(QDialog):
         if template_data is None:
             return
 
-        # Get frame
-        pixmap = self.graphicsView.pixmap()
-        if pixmap is None:
+        # Get full unzoomed frame
+        if self.latest_full_frame is None:
             print("No frame yet, skipping")
             return
 
-        # Convert frame
-        image = pixmap.toImage()
-        w, h = image.width(), image.height()
-        ptr = image.bits()
-        ptr.setsize(h * w * 4)
-        arr = np.array(ptr).reshape(h, w, 4)
-        live_frame = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+        live_frame = self.latest_full_frame.copy()
 
         # Match
         threshold = float(config_data.get("template", "confidence_threshold", fallback="0.70"))
@@ -2455,19 +3107,25 @@ class MainWindow(QDialog):
             # Success (silent)
             x1, y1, x2, y2 = roi_coords
             digit_count = int(template_data['digit_count'])
-            zoom_level = int(template_data['zoom_level'])
+
+            # Coordinates are in full-frame space (zoom_level=1)
+            zoom_level = 1
 
             self.coordinate1 = (x1, y1, zoom_level)
             self.coordinate2 = (x2, y2, zoom_level)
             self.selected_ROI = True
+            self.roi_in_frame_space = True  # Flag: coordinates are already in frame space
             self.digitcount = digit_count
 
-            digit_map = {1: self.digitcount1, 2: self.digitcount2,
-                         3: self.digitcount3, 4: self.digitcount4, 5: self.digitcount5}
-            if digit_count in digit_map:
-                digit_map[digit_count].setChecked(True)
+            # Update digit count spin box
+            self.digitCountSpin.setValue(digit_count)
+            self.lcdNumber.setDigitCount(digit_count + 1)
 
-            config_data["main"]["roi"] = f"{x1},{y1},{x2},{y2},{digit_count}"
+            config_data["main"]["roi"] = f"{x1},{y1},{x2},{y2},{zoom_level},1"  # 1 = frame space
+            config_data["main"]["digit_count"] = str(digit_count)
+
+            # Stop any pending debounced saves to prevent race conditions
+            self.config_save_timer.stop()
             self.save_configs()
 
             self.regionselection.setText(f"Auto-cal OK ({confidence:.0%})")
@@ -2483,7 +3141,7 @@ class MainWindow(QDialog):
     # play selected video
     def play_movie(self):
         # first set and save default speed
-        self.defaultspeed = float(self.videospeedEdit.toPlainText())
+        self.defaultspeed = self.speedInput.value()
         for k,f in self.filelist.items():
             if f["size"] == self.chosen_file['size']:
                 f["rate"] = self.defaultspeed
@@ -2492,6 +3150,7 @@ class MainWindow(QDialog):
         self.update_filedata()
 
         print("writing updated rate (%.3f)" % self.defaultspeed)
+        self.config_save_timer.stop()  # Prevent race conditions
         self.save_configs()
 
         # finally play video in separate window
