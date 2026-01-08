@@ -87,7 +87,7 @@ white = QColor(255, 255, 255)
 
 # FOR DEBUGGING AND DEVELOPMENT
 import matplotlib.pyplot as plt
-WEBCAM_VIDEO = r"C:\code\TreadmillApp\videos\Video 3.wmv"
+WEBCAM_VIDEO = r"C:\code\TreadmillApp\videos\Video 4.wmv"
 DEBUG_SPEED_OVERRIDE = None #13
 LOAD_MODEL = True # set false for faster loading in debugging
 
@@ -2960,6 +2960,9 @@ class MainWindow(QMainWindow):
 
                     frame = register_image(template_frame,frame)
 
+                    # Store clean registered frame (before drawing ROI boxes) for template capture
+                    self.latest_full_frame = frame.copy()
+
                     if self.selected_ROI:
                         # Get ROI coordinates
                         # Check if coordinates are already in frame space (from auto-cal) or view space (from manual click)
@@ -3050,9 +3053,6 @@ class MainWindow(QMainWindow):
                         frame = cv2.rectangle(frame, (x1,y1),(x2,y2), (0, 255, 0), 2)
                         rectangles = None
                         old_ROI = None
-
-                    # Store full unzoomed frame for template capture
-                    self.latest_full_frame = frame.copy()
 
                     zoom_level = self.zoomlevel.value()
                     if zoom_level > 1:
