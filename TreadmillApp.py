@@ -29,7 +29,7 @@ if 'template' not in config_data:
     config_data['template']['active_template'] = 'default'
     config_data['template']['template_directory'] = 'templates/'
     config_data['template']['auto_calibrate_on_startup'] = 'true'
-    config_data['template']['confidence_threshold'] = '0.70'
+    config_data['template']['matching_threshold'] = '0.50'
 
     with open(CONFIG_FILE, 'w', encoding="UTF-8") as configfile:
         config_data.write(configfile)
@@ -87,7 +87,7 @@ white = QColor(255, 255, 255)
 
 # FOR DEBUGGING AND DEVELOPMENT
 import matplotlib.pyplot as plt
-WEBCAM_VIDEO = r"C:\code\TreadmillApp\videos\Video 4.wmv"
+WEBCAM_VIDEO = r"C:\code\TreadmillApp\videos\Video 3.wmv"
 DEBUG_SPEED_OVERRIDE = None #13
 LOAD_MODEL = True # set false for faster loading in debugging
 
@@ -252,10 +252,15 @@ class TemplateManager:
             path = os.path.join(self.template_dir, f"{name}.npz")
             np.savez_compressed(path, **template_data)
 
+            # Also save template image as PNG for easy viewing
+            png_path = os.path.join(self.template_dir, f"{name}.png")
+            cv2.imwrite(png_path, template_data['template_image'])
+
             # Update current template
             self.current_template = template_data
 
             print(f"Saved template: {name} to {path}")
+            print(f"Saved template image: {png_path}")
             return True
 
         except Exception as e:
@@ -282,6 +287,12 @@ class TemplateManager:
             os.remove(path)
             print(f"Deleted template: {name}")
 
+            # Also delete the PNG file if it exists
+            png_path = os.path.join(self.template_dir, f"{name}.png")
+            if os.path.exists(png_path):
+                os.remove(png_path)
+                print(f"Deleted template image: {png_path}")
+
             # Clear current template if it was deleted
             if self.current_template is not None:
                 self.current_template = None
@@ -305,7 +316,7 @@ class TemplateManager:
 class ROIMatcher:
     """
     Matches template to live frame using ORB features and homography transformation.
-    Returns ROI coordinates and confidence score.
+    Returns ROI coordinates and matching ratio.
     """
 
     def __init__(self):
@@ -353,47 +364,59 @@ class ROIMatcher:
 
         return enhanced
 
-    def validate_homography(self, H):
+    def validate_similarity(self, H):
         """
-        Validate that homography transformation is reasonable.
-        Rejects extreme scaling, rotation, or perspective distortion.
+        Validate that similarity transformation is reasonable.
+        Rejects excessive rotation or scaling.
+        Similarity transform has only 4 DOF: translation (x,y), rotation, uniform scale.
 
         Args:
-            H: 3x3 homography matrix
+            H: 3x3 matrix (similarity in homography format)
 
         Returns:
-            Boolean indicating if homography is valid
+            Boolean indicating if transformation is valid
         """
         if H is None:
             return False
 
         try:
-            # Extract scale factors from homography
-            sx = np.sqrt(H[0, 0]**2 + H[1, 0]**2)
-            sy = np.sqrt(H[0, 1]**2 + H[1, 1]**2)
+            # Extract 2x2 linear part
+            A = H[:2, :2]
 
-            # Check scale (reject if object appears more than 2x larger/smaller)
-            if sx < 0.5 or sx > 2.0 or sy < 0.5 or sy > 2.0:
-                print(f"Homography rejected: excessive scale sx={sx:.2f}, sy={sy:.2f}")
+            # Extract scale (should be uniform for similarity transform)
+            sx = np.sqrt(A[0, 0]**2 + A[1, 0]**2)
+            sy = np.sqrt(A[0, 1]**2 + A[1, 1]**2)
+
+            # Average scale (should be nearly equal for true similarity)
+            scale = (sx + sy) / 2.0
+
+            # Check uniform scale (75% - 150%)
+            if scale < 0.75 or scale > 1.5:
+                print(f"Similarity rejected: scale {scale:.2f} outside [0.75, 1.5]")
+                return False
+
+            # Verify scales are uniform (within 5% of each other)
+            if abs(sx - sy) > 0.05 * scale:
+                print(f"Similarity rejected: non-uniform scale sx={sx:.2f}, sy={sy:.2f}")
                 return False
 
             # Extract rotation angle
             angle = np.arctan2(H[1, 0], H[0, 0]) * 180 / np.pi
 
-            # Check rotation (reject if > 15 degrees)
+            # Check rotation (< 15 degrees)
             if abs(angle) > 15:
-                print(f"Homography rejected: excessive rotation angle={angle:.1f}°")
+                print(f"Similarity rejected: rotation {angle:.1f}° exceeds 15°")
                 return False
 
-            # Check perspective distortion (H[2,0] and H[2,1] should be small)
+            # Ensure no perspective (should be [0, 0, 1] in last row)
             if abs(H[2, 0]) > 0.001 or abs(H[2, 1]) > 0.001:
-                print(f"Homography rejected: excessive perspective H[2,0]={H[2,0]:.4f}, H[2,1]={H[2,1]:.4f}")
+                print(f"Similarity rejected: perspective components present")
                 return False
 
             return True
 
         except Exception as e:
-            print(f"Error validating homography: {e}")
+            print(f"Error validating similarity: {e}")
             return False
 
     def transform_roi(self, template_roi, H):
@@ -476,7 +499,8 @@ class ROIMatcher:
 
         return True
 
-    def match_template(self, live_frame, template_data, threshold=0.70):
+    def match_template(self, live_frame, template_data, threshold=0.50,
+                       ratio_threshold=0.75, ransac_threshold=5.0, min_matches=15):
         """
         Match template to live frame and compute ROI transformation.
         Main algorithm using ORB features, FLANN matching, and homography.
@@ -484,10 +508,10 @@ class ROIMatcher:
         Args:
             live_frame: Current webcam frame (H, W, 3) BGR
             template_data: Dictionary with template info
-            threshold: Minimum confidence threshold (0-1)
+            threshold: Minimum matching ratio threshold (0-1)
 
         Returns:
-            Tuple: ([x1, y1, x2, y2], confidence) or (None, confidence)
+            Tuple: ([x1, y1, x2, y2], matching_ratio, H) or (None, matching_ratio, None)
         """
         try:
             # Step 1: Preprocess images
@@ -507,15 +531,15 @@ class ROIMatcher:
             # Validate sufficient features found
             if desc_template is None or desc_live is None:
                 print("Feature detection failed: no descriptors found")
-                return None, 0.0
+                return None, 0.0, None
 
             if len(kp_template) < 10:
                 print(f"Too few template features: {len(kp_template)} (need 10+)")
-                return None, 0.0
+                return None, 0.0, None
 
             if len(kp_live) < 10:
                 print(f"Too few live frame features: {len(kp_live)} (need 10+)")
-                return None, 0.0
+                return None, 0.0, None
 
             # Step 3: Match features using FLANN
             matches = self.matcher.knnMatch(desc_template, desc_live, k=2)
@@ -525,12 +549,12 @@ class ROIMatcher:
             for match_pair in matches:
                 if len(match_pair) == 2:
                     m, n = match_pair
-                    if m.distance < 0.75 * n.distance:  # Ratio threshold
+                    if m.distance < ratio_threshold * n.distance:  # Ratio threshold
                         good_matches.append(m)
 
-            if len(good_matches) < 15:
-                print(f"Too few good matches: {len(good_matches)} (need 15+)")
-                return None, 0.0
+            if len(good_matches) < min_matches:
+                print(f"Too few good matches: {len(good_matches)} (need {min_matches}+)")
+                return None, 0.0, None
 
             # Step 4: Compute homography
             # Extract point coordinates from matches
@@ -541,46 +565,111 @@ class ROIMatcher:
             src_pts = src_pts.reshape(-1, 1, 2)
             dst_pts = dst_pts.reshape(-1, 1, 2)
 
-            # Compute homography with RANSAC
-            H, mask_ransac = cv2.findHomography(
+            # Compute similarity transformation (translation + rotation + uniform scale only)
+            # This is more robust than full homography or affine
+            A, mask_ransac = cv2.estimateAffinePartial2D(
                 src_pts,
                 dst_pts,
                 method=cv2.RANSAC,
-                ransacReprojThreshold=5.0  # Max pixel error for inliers
+                ransacReprojThreshold=ransac_threshold,  # Max pixel error for inliers
+                maxIters=2000,
+                confidence=0.99
             )
 
-            if H is None:
-                print("Homography computation failed")
-                return None, 0.0
+            # Convert 2x3 similarity to 3x3 homography format for compatibility
+            if A is not None:
+                H = np.vstack([A, [0, 0, 1]])
+            else:
+                H = None
 
-            # Step 5: Validate homography
-            if not self.validate_homography(H):
-                return None, 0.0
+            if H is None:
+                print("Similarity transformation computation failed")
+                return None, 0.0, None
+
+            # Step 5: Validate similarity transformation
+            if not self.validate_similarity(H):
+                return None, 0.0, None
 
             # Calculate confidence based on inliers
             inliers = np.sum(mask_ransac)
             confidence = float(inliers) / len(good_matches)
 
             if confidence < threshold:
-                print(f"Confidence too low: {confidence:.1%} < {threshold:.1%}")
-                return None, confidence
+                print(f"Matching ratio too low: {confidence:.1%} < {threshold:.1%}")
+                return None, confidence, None
 
             # Step 6: Transform ROI coordinates
             roi_live = self.transform_roi(template_data['roi_box'], H)
 
             # Step 7: Validate transformed ROI
             if not self.validate_roi(roi_live, live_frame.shape):
-                return None, confidence
+                return None, confidence, None
 
             # Success!
-            print(f"Template matched! Confidence: {confidence:.1%}, ROI: {roi_live}")
-            return roi_live, confidence
+            print(f"Template matched! Matching ratio: {confidence:.1%}, ROI: {roi_live}")
+            return roi_live, confidence, H
 
         except Exception as e:
             print(f"Error in template matching: {e}")
             import traceback
             traceback.print_exc()
-            return None, 0.0
+            return None, 0.0, None
+
+    def match_template_robust(self, live_frame, template_data, threshold=0.50, num_trials=20):
+        """
+        Robust template matching with multi-start optimization.
+
+        Runs multiple trials with varied parameters and returns best result.
+        This dramatically improves reliability by avoiding local minima.
+
+        Args:
+            live_frame: Current webcam frame
+            template_data: Template dictionary
+            threshold: Minimum matching ratio threshold
+            num_trials: Number of trials (default 20, takes ~1-2 seconds)
+
+        Returns:
+            Tuple: (best_roi, best_matching_ratio, best_H)
+        """
+        best_roi = None
+        best_confidence = 0.0
+        best_H = None
+
+        # Parameter variations
+        ratio_thresholds = [0.70, 0.75, 0.80]
+        ransac_thresholds = [3.0, 5.0, 7.0]
+        min_matches_list = [10, 15, 20]
+
+        print(f"Running {num_trials} trials for robust matching...")
+
+        for trial in range(num_trials):
+            # Cycle through parameter combinations
+            ratio = ratio_thresholds[trial % len(ratio_thresholds)]
+            ransac = ransac_thresholds[(trial // len(ratio_thresholds)) % len(ransac_thresholds)]
+            min_match = min_matches_list[(trial // (len(ratio_thresholds) * len(ransac_thresholds))) % len(min_matches_list)]
+
+            # Run matching with these parameters
+            roi, confidence, H = self.match_template(
+                live_frame, template_data, threshold,
+                ratio_threshold=ratio,
+                ransac_threshold=ransac,
+                min_matches=min_match
+            )
+
+            # Keep best result
+            if confidence > best_confidence:
+                best_confidence = confidence
+                best_roi = roi
+                best_H = H
+                print(f"  Trial {trial+1}: matching_ratio={confidence:.1%} (new best!)")
+
+            # Early exit if we get excellent match
+            if best_confidence > 0.90:
+                print(f"  Early exit at trial {trial+1} with {best_confidence:.1%} matching ratio")
+                break
+
+        print(f"Best result: {best_confidence:.1%} matching ratio")
+        return best_roi, best_confidence, best_H
 
 
 class TemplateCaptureDialog(QDialog):
@@ -1479,6 +1568,8 @@ class VideoWindow(QMainWindow):
 
 # this is the main window that contains list of videos and webcam stream
 class MainWindow(QMainWindow):
+    # Signal for thread-safe GUI updates from camera thread
+    confidence_updated = pyqtSignal(int)
 
     def __init__(self):
         super().__init__()
@@ -1522,6 +1613,10 @@ class MainWindow(QMainWindow):
         self.frame_shift_x = int(float(config_data.get("main", "shift_center_x", fallback="0")))
         self.frame_shift_y = int(float(config_data.get("main", "shift_center_y", fallback="0")))
         self.frame_shift_step = 10  # Pixels per button press
+
+        # Frame flip state (for display orientation)
+        self.flip_horizontal = config_data.get("main", "flip_horizontal", fallback="false").lower() == "true"
+        self.flip_vertical = config_data.get("main", "flip_vertical", fallback="false").lower() == "true"
 
         # Debounced config save timer (prevents UI blocking on rapid button presses)
         self.config_save_timer = QTimer()
@@ -1575,6 +1670,8 @@ class MainWindow(QMainWindow):
         # Set initial speed
         self.set_running_speed(current_running_speed)
 
+        self.resize(1300,900)
+
         self.show()
 
     def setupUi(self):
@@ -1583,17 +1680,41 @@ class MainWindow(QMainWindow):
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
 
-        self.main_layout = QHBoxLayout(self.central_widget)
-        self.main_layout.setContentsMargins(10, 10, 10, 10)
-        self.main_layout.setSpacing(10)
+        # Use QSplitter for resizable panels
+        from PyQt5.QtWidgets import QSplitter
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.setHandleWidth(8)
+        self.main_splitter.setStyleSheet("""
+            QSplitter::handle {
+                background-color: #ddd;
+            }
+            QSplitter::handle:hover {
+                background-color: #bbb;
+            }
+        """)
+
+        main_layout = QHBoxLayout(self.central_widget)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.addWidget(self.main_splitter)
 
         # Build panels
         self.left_panel = self.build_left_panel()
         self.right_panel = self.build_right_panel()
 
-        # Add to main layout with stretch factors
-        self.main_layout.addWidget(self.left_panel, stretch=0)  # Fixed width
-        self.main_layout.addWidget(self.right_panel, stretch=1)  # Expanding
+        # Add to splitter
+        self.main_splitter.addWidget(self.left_panel)
+        self.main_splitter.addWidget(self.right_panel)
+
+        # Prevent panels from collapsing completely
+        self.main_splitter.setCollapsible(0, False)  # Left panel cannot collapse
+        self.main_splitter.setCollapsible(1, False)  # Right panel cannot collapse
+
+        # Set stretch factors (right panel gets more weight)
+        self.main_splitter.setStretchFactor(0, 0)  # Left panel: fixed preference
+        self.main_splitter.setStretchFactor(1, 1)  # Right panel: expandable
+
+        # Set initial splitter sizes (left panel gets 350px, right panel gets remaining space)
+        self.main_splitter.setSizes([350, 650])
 
         # Enable mouse tracking for ROI selection
         self.setMouseTracking(True)
@@ -1610,8 +1731,7 @@ class MainWindow(QMainWindow):
     def build_left_panel(self):
         """Build left panel with video library and controls."""
         panel = QWidget()
-        panel.setMinimumWidth(350)
-        panel.setMaximumWidth(400)
+        panel.setMinimumWidth(300)  # Only set minimum, allow resizing
 
         layout = QVBoxLayout(panel)
         layout.setSpacing(10)
@@ -1718,6 +1838,7 @@ class MainWindow(QMainWindow):
     def build_right_panel(self):
         """Build right panel with camera, speed, and settings."""
         panel = QWidget()
+        panel.setMinimumWidth(400)  # Set minimum width to prevent collapse
         layout = QVBoxLayout(panel)
         layout.setSpacing(10)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1746,7 +1867,7 @@ class MainWindow(QMainWindow):
         # Camera view (expanding)
         self.graphicsView = QLabel()
         self.graphicsView.setObjectName("cameraView")
-        self.graphicsView.setMinimumSize(500, 400)
+        self.graphicsView.setMinimumSize(300, 300)  # Reduced for better resizing flexibility
         self.graphicsView.setMaximumHeight(800)  # Prevent vertical expansion over buttons
         self.graphicsView.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.graphicsView.setAlignment(Qt.AlignCenter)
@@ -1822,7 +1943,7 @@ class MainWindow(QMainWindow):
         return widget
 
     def build_camera_controls(self):
-        """Build camera control row."""
+        """Build camera control row with improved flip buttons."""
         layout = QHBoxLayout()
 
         # Source selection
@@ -1837,38 +1958,53 @@ class MainWindow(QMainWindow):
         self.tracking = QCheckBox("Tracking")
         self.tracking.setChecked(True)
 
-        # Template controls
-        template_label = QLabel("Template:")
-        self.template_combo = QComboBox()
-        self.template_combo.setObjectName("template_combo")
+        # Flip buttons - larger with full labels
+        self.flipHorizontalBtn = QPushButton("Flip Horizontal")
+        self.flipHorizontalBtn.setObjectName("flipBtn")
+        self.flipHorizontalBtn.setCheckable(True)
+        self.flipHorizontalBtn.setChecked(self.flip_horizontal)
+        self.flipHorizontalBtn.setFixedWidth(40)
+        self.flipHorizontalBtn.setFixedHeight(25)
+        self.flipHorizontalBtn.setStyleSheet(""" QPushButton { padding: 0px; } """)
+        self.flipHorizontalBtn.setToolTip("Flip camera view horizontally (mirror left/right)")
 
-        self.capture_template_btn = QPushButton("Capture")
-        self.capture_template_btn.setObjectName("captureTemplateBtn")
-
-        self.auto_calibrate_btn = QPushButton("Auto-Cal")
-        self.auto_calibrate_btn.setObjectName("autoCalibrateBtn")
+        self.flipVerticalBtn = QPushButton("Flip Vertical")
+        self.flipVerticalBtn.setObjectName("flipBtn")
+        self.flipVerticalBtn.setCheckable(True)
+        self.flipVerticalBtn.setChecked(self.flip_vertical)
+        self.flipVerticalBtn.setFixedWidth(40)
+        self.flipVerticalBtn.setFixedHeight(25)
+        self.flipVerticalBtn.setStyleSheet(""" QPushButton { padding: 0px; } """)
+        self.flipVerticalBtn.setToolTip("Flip camera view vertically (upside down)")
 
         layout.addWidget(source_label)
         layout.addWidget(self.sourceCombo)
         layout.addWidget(self.tracking)
         layout.addStretch()
-        layout.addWidget(template_label)
-        layout.addWidget(self.template_combo)
-        layout.addWidget(self.capture_template_btn)
-        layout.addWidget(self.auto_calibrate_btn)
+        layout.addWidget(self.flipHorizontalBtn)
+        layout.addWidget(self.flipVerticalBtn)
 
         return layout
 
     def build_speed_group(self):
-        """Build speed display section."""
-        group = QGroupBox("Speed Display")
-        layout = QVBoxLayout()
+        """Build speed display section with template controls."""
+        group = QGroupBox("Speed Display & Template")
+        main_layout = QHBoxLayout()  # Horizontal split
+
+        # LEFT SECTION: Speed display
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 10, 0)
 
         # LCD number
         self.lcdNumber = QLCDNumber()
-        self.lcdNumber.setDigitCount(4)  # digit_count + 1
+        # Initial digit count - will be updated in load_config() with actual values
+        self.lcdNumber.setDigitCount(self.digitcount + (1 if self.precision > 0 else 0))
         self.lcdNumber.setMinimumHeight(50)
+        self.lcdNumber.setMaximumHeight(80)
         self.lcdNumber.setSegmentStyle(QLCDNumber.Flat)
+        # Set size policy to allow width to shrink
+        self.lcdNumber.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.lcdNumber.setStyleSheet("""
             QLCDNumber {
                 background-color: #1e1e1e;
@@ -1890,11 +2026,11 @@ class MainWindow(QMainWindow):
         info_row.addStretch()
         info_row.addWidget(self.regionselection)
 
-        # Confidence progress bar (NEW)
+        # Confidence progress bar
         self.confidenceBar = QProgressBar()
         self.confidenceBar.setRange(0, 100)
         self.confidenceBar.setValue(0)
-        self.confidenceBar.setFormat("Match Confidence: %p%")
+        self.confidenceBar.setFormat("Recognition confidence: %p%")
         self.confidenceBar.setTextVisible(True)
         self.confidenceBar.setStyleSheet("""
             QProgressBar {
@@ -1907,12 +2043,50 @@ class MainWindow(QMainWindow):
                 background-color: #4CAF50;
             }
         """)
+        # Connect signal for thread-safe updates from camera thread
+        self.confidence_updated.connect(self.confidenceBar.setValue)
 
-        layout.addWidget(self.lcdNumber)
-        layout.addLayout(info_row)
-        layout.addWidget(self.confidenceBar)
+        left_layout.addWidget(self.lcdNumber)
+        left_layout.addLayout(info_row)
+        left_layout.addWidget(self.confidenceBar)
 
-        group.setLayout(layout)
+        # RIGHT SECTION: Template controls
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(10, 0, 0, 0)
+
+        # Template dropdown
+        template_label = QLabel("Template:")
+        template_label.setStyleSheet("font-weight: bold; font-size: 12px;")
+        self.template_combo = QComboBox()
+        self.template_combo.setObjectName("template_combo")
+        self.template_combo.setMinimumHeight(30)
+
+        # Capture button
+        self.capture_template_btn = QPushButton("Capture Template")
+        self.capture_template_btn.setObjectName("captureTemplateBtn")
+        self.capture_template_btn.setFixedWidth(150)
+        self.capture_template_btn.setFixedHeight(30)
+        self.capture_template_btn.setStyleSheet(""" QPushButton { padding: 0px; } """)        
+
+        # Auto-calibrate button
+        self.auto_calibrate_btn = QPushButton("Auto-Calibrate")
+        self.auto_calibrate_btn.setObjectName("autoCalibrateBtn")
+        self.auto_calibrate_btn.setFixedWidth(150)
+        self.auto_calibrate_btn.setFixedHeight(30)
+        self.auto_calibrate_btn.setStyleSheet(""" QPushButton { padding: 0px; } """)        
+
+        right_layout.addWidget(template_label)
+        right_layout.addWidget(self.template_combo)
+        right_layout.addWidget(self.capture_template_btn)
+        right_layout.addWidget(self.auto_calibrate_btn)
+        right_layout.addStretch()
+
+        # Add both sections to main horizontal layout
+        main_layout.addWidget(left_widget, stretch=1)
+        main_layout.addWidget(right_widget, stretch=1)
+
+        group.setLayout(main_layout)
         return group
 
     def build_settings_group(self):
@@ -2003,6 +2177,8 @@ class MainWindow(QMainWindow):
         # Camera controls
         self.sourceCombo.currentIndexChanged.connect(self.on_source_changed)
         self.tracking.toggled.connect(self.on_tracking_toggled)
+        self.flipHorizontalBtn.clicked.connect(self.on_flip_horizontal)
+        self.flipVerticalBtn.clicked.connect(self.on_flip_vertical)
         self.template_combo.currentIndexChanged.connect(self.on_template_changed)
         self.capture_template_btn.clicked.connect(self.capture_template)
         self.auto_calibrate_btn.clicked.connect(self.auto_calibrate_roi)
@@ -2042,14 +2218,26 @@ class MainWindow(QMainWindow):
         if checked:
             self.start_camera()
 
+    def on_flip_horizontal(self):
+        """Handle horizontal flip button click."""
+        self.flip_horizontal = self.flipHorizontalBtn.isChecked()
+        config_data["main"]["flip_horizontal"] = str(self.flip_horizontal).lower()
+        self.config_save_timer.start()  # Debounced save
+
+    def on_flip_vertical(self):
+        """Handle vertical flip button click."""
+        self.flip_vertical = self.flipVerticalBtn.isChecked()
+        config_data["main"]["flip_vertical"] = str(self.flip_vertical).lower()
+        self.config_save_timer.start()  # Debounced save
+
     def on_digit_count_changed(self, value):
         """Handle digit count change from spin box."""
         self.digitcount = value
         print(f"Digit count changed to: {value}")
         config_data["main"]["digit_count"] = str(value)
         self.save_configs()
-        # Update LCD digit count
-        self.lcdNumber.setDigitCount(value + 1)
+        # Update LCD size based on digitcount and precision
+        self.update_lcd_size()
 
     def on_precision_changed(self, value):
         """Handle precision change from spin box."""
@@ -2057,6 +2245,8 @@ class MainWindow(QMainWindow):
         print(f"Precision changed to: {value}")
         config_data["main"]["precision"] = str(value)
         self.save_configs()
+        # Update LCD size based on digitcount and precision
+        self.update_lcd_size()
 
     def apply_styling(self):
         """Apply modern styling to application."""
@@ -2163,6 +2353,27 @@ class MainWindow(QMainWindow):
         QPushButton#shiftResetBtn {
             background-color: #9E9E9E;
             max-width: 60px;
+        }
+
+        /* Flip Buttons */
+        QPushButton#flipBtn {
+            background-color: #757575;
+            min-width: 120px;
+            min-height: 28px;
+            font-size: 12px;
+        }
+
+        QPushButton#flipBtn:hover {
+            background-color: #616161;
+        }
+
+        QPushButton#flipBtn:checked {
+            background-color: #FFA726;
+            font-weight: bold;
+        }
+
+        QPushButton#flipBtn:checked:hover {
+            background-color: #FF9800;
         }
 
         /* Input Fields */
@@ -2275,6 +2486,26 @@ class MainWindow(QMainWindow):
                 )
                 self.graphicsView.setPixmap(scaled_pixmap)
 
+    def calculate_lcd_digit_count(self):
+        """Calculate the required LCD digit count based on digitcount and precision.
+
+        Examples:
+        - digitcount=3, precision=1 -> "12.3" needs 4 characters (3 digits + decimal point)
+        - digitcount=3, precision=0 -> "123" needs 3 characters
+        - digitcount=5, precision=2 -> "123.45" needs 6 characters
+        """
+        return self.digitcount + (1 if self.precision > 0 else 0)
+
+    def update_lcd_size(self):
+        """Update LCD digit count and maximum width based on current digitcount and precision."""
+        digit_count = self.calculate_lcd_digit_count()
+        self.lcdNumber.setDigitCount(digit_count)
+        # Each LCD digit is approximately 35-40 pixels wide, plus some padding
+        # Use 40 pixels per character + 30 pixels for borders/padding
+        max_width = digit_count * 40 + 30
+        self.lcdNumber.setMaximumWidth(max_width)
+        print(f"LCD updated: {digit_count} digits, max width: {max_width}px")
+
     def load_config(self):
         """Load configuration into UI widgets."""
         # Video path - already loaded in build_left_panel
@@ -2285,12 +2516,14 @@ class MainWindow(QMainWindow):
         digit_count = int(float(config_data.get("main", "digit_count", fallback="3")))
         self.digitCountSpin.setValue(digit_count)
         self.digitcount = digit_count
-        self.lcdNumber.setDigitCount(digit_count + 1)
 
         # Precision
         precision = int(float(config_data.get("main", "precision", fallback="1")))
         self.precisionSpin.setValue(precision)
         self.precision = precision
+
+        # Update LCD size based on both digitcount and precision
+        self.update_lcd_size()
 
         # Zoom
         zoom = int(float(config_data.get("main", "zoom_level", fallback="1")))
@@ -2335,14 +2568,32 @@ class MainWindow(QMainWindow):
         pass
 
     def set_running_speed(self,val):
-        self.lcdNumber.setNumDigits(self.digitcount+1)
+        # Digit count is now managed by update_lcd_size()
         self.lcdNumber.display(val)
+
+    def correct_mouse_coords_for_flip(self, x, y):
+        """Correct mouse coordinates to account for view flips.
+
+        When the view is flipped, mouse coordinates need to be inverted to match
+        the original frame coordinates for ROI selection.
+        """
+        view_width = self.graphicsView.width()
+        view_height = self.graphicsView.height()
+
+        if self.flip_horizontal:
+            x = view_width - x
+        if self.flip_vertical:
+            y = view_height - y
+
+        return x, y
 
     def mousemove(self,e):
         if self.frame_shape is not None:
             #zoom_level = self.zoomlevel.value()
             x = e.x()
             y = e.y()
+            # Correct coordinates for view flips
+            x, y = self.correct_mouse_coords_for_flip(x, y)
             #print("mouse coord current: x=%i y=%i" % (int(x), int(y)))
             self.mouse_pos = (x, y)
 
@@ -2382,6 +2633,8 @@ class MainWindow(QMainWindow):
         if e.button()==1 and not(self.selected_ROI) and self.frame_shape is not None:
             x = e.x()
             y = e.y()
+            # Correct coordinates for view flips
+            x, y = self.correct_mouse_coords_for_flip(x, y)
             if self.coordinate1 is None:
                 self.coordinate1 = (x, y,self.zoomlevel.value())
                 self.coordinate2 = None
@@ -2518,6 +2771,12 @@ class MainWindow(QMainWindow):
                     pixmap = QtGui.QPixmap.fromImage(image)
                     pixmap = pixmap.scaled(self.graphicsView.width(), self.graphicsView.height(), QtCore.Qt.KeepAspectRatio)
 
+                    # Apply flips if enabled
+                    if self.flip_horizontal or self.flip_vertical:
+                        transform = QtGui.QTransform()
+                        transform.scale(-1 if self.flip_horizontal else 1, -1 if self.flip_vertical else 1)
+                        pixmap = pixmap.transformed(transform)
+
                     init_run+=1
                     template_frame += frame.astype(float)/INITIAL_FRAMES
                     if init_run==INITIAL_FRAMES:
@@ -2618,6 +2877,8 @@ class MainWindow(QMainWindow):
 
                             self.lcdNumber.display("{1:,.{0}f}".format(self.precision,current_running_speed))
                             self.frames_per_sec.setText("%.2f frames/sec" % (1.0 / (max(0.0001,time.time()-now))))
+                            # Update confidence bar with digit recognition confidence (thread-safe via signal)
+                            self.confidence_updated.emit(int(predicted_prob * 100))
                             last_prediction_time = now
 
                         frame = cv2.rectangle(frame, (ROI[0],ROI[1]),(ROI[2],ROI[3]), (0, 255, 0),3)
@@ -2651,6 +2912,12 @@ class MainWindow(QMainWindow):
                     image = QtGui.QImage(frame.data.tobytes(), frame.shape[1], frame.shape[0], QtGui.QImage.Format_RGB888).rgbSwapped()
                     pixmap = QtGui.QPixmap.fromImage(image)
                     pixmap = pixmap.scaled(self.graphicsView.width(), self.graphicsView.height(), QtCore.Qt.KeepAspectRatio)
+
+                    # Apply flips if enabled
+                    if self.flip_horizontal or self.flip_vertical:
+                        transform = QtGui.QTransform()
+                        transform.scale(-1 if self.flip_horizontal else 1, -1 if self.flip_vertical else 1)
+                        pixmap = pixmap.transformed(transform)
 
                 # Only update display if not showing overlay
                 if not self.show_overlay:
@@ -2867,16 +3134,17 @@ class MainWindow(QMainWindow):
             else:
                 QMessageBox.critical(self, "Failed", f"Failed to save '{name}'.")
 
-    def show_template_overlay(self, live_frame, template_data, roi_coords, confidence, success_message=None):
+    def show_template_overlay(self, live_frame, template_data, roi_coords, confidence, H, success_message=None):
         """
         Display template overlaid on live frame for 2 seconds using falsecolor composite.
-        Shows in the main camera view, not a separate popup.
+        Shows the WARPED template (after similarity transformation) to visualize alignment quality.
 
         Args:
             live_frame: Current webcam frame (BGR)
             template_data: Template dictionary with 'template_image' key
             roi_coords: Matched ROI coordinates [x1, y1, x2, y2]
-            confidence: Matching confidence (0.0 to 1.0)
+            confidence: Matching ratio (0.0 to 1.0)
+            H: 3x3 transformation matrix used for warping template to match live frame
             success_message: Optional message to show after overlay (str)
         """
         try:
@@ -2887,16 +3155,23 @@ class MainWindow(QMainWindow):
             # Get template image
             template_img = template_data['template_image']
 
+            # Warp template to align with live frame using the computed transformation
+            template_warped = cv2.warpPerspective(
+                template_img,
+                H,
+                (live_frame.shape[1], live_frame.shape[0])
+            )
+
             # Convert both to grayscale
             live_gray = cv2.cvtColor(live_frame, cv2.COLOR_BGR2GRAY)
-            template_gray = cv2.cvtColor(template_img, cv2.COLOR_BGR2GRAY)
+            template_warped_gray = cv2.cvtColor(template_warped, cv2.COLOR_BGR2GRAY)
 
             # Create falsecolor composite (like MATLAB's imshowpair)
-            # DON'T draw ROI box here - it will be drawn on top later
+            # Now shows ALIGNED template vs live frame to visualize matching quality
             falsecolor = np.zeros((live_gray.shape[0], live_gray.shape[1], 3), dtype=np.uint8)
-            falsecolor[:, :, 0] = template_gray  # Blue = template
-            falsecolor[:, :, 1] = live_gray      # Green = live frame
-            falsecolor[:, :, 2] = template_gray  # Red = template
+            falsecolor[:, :, 0] = template_warped_gray  # Blue = warped template
+            falsecolor[:, :, 1] = live_gray             # Green = live frame
+            falsecolor[:, :, 2] = template_warped_gray  # Red = warped template
 
             # Add text overlay
             cv2.rectangle(falsecolor, (5, 5), (550, 85), (0, 0, 0), -1)
@@ -2904,7 +3179,7 @@ class MainWindow(QMainWindow):
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
             cv2.putText(falsecolor, "GREEN=Live | MAGENTA=Template | WHITE=Aligned", (10, 58),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            cv2.putText(falsecolor, f"Match Confidence: {confidence:.1%}", (10, 78),
+            cv2.putText(falsecolor, f"Match Matching ratio: {confidence:.1%}", (10, 78),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
             print(f"Falsecolor created: {falsecolor.shape}")
@@ -2940,16 +3215,14 @@ class MainWindow(QMainWindow):
 
             print(f"ROI box drawn on top: ({x1},{y1},{x2},{y2})")
 
-            # Store overlay and set flag to pause camera updates
+            # Store overlay and set flag
+            # The camera thread will pick up the overlay and display it
             self.overlay_pixmap = scaled_pixmap
             self.overlay_success_message = success_message
             self.show_overlay = True
 
-            # Display overlay in camera view
-            self.graphicsView.setPixmap(self.overlay_pixmap)
-            self.graphicsView.update()
-            self.graphicsView.repaint()
-            QApplication.processEvents()
+            # Don't call setPixmap here - let camera thread handle display updates
+            # This avoids race condition between threads updating the same widget
 
             print("Overlay displayed in camera view for 2 seconds")
             print("="*60 + "\n")
@@ -2968,10 +3241,8 @@ class MainWindow(QMainWindow):
         self.show_overlay = False
         self.overlay_pixmap = None
 
-        # Show success message if provided
-        if self.overlay_success_message:
-            QMessageBox.information(self, "Success", self.overlay_success_message)
-            self.overlay_success_message = None
+        # Success message already shown in overlay - no popup needed
+        self.overlay_success_message = None
 
     def auto_calibrate_roi(self):
         """
@@ -3001,12 +3272,12 @@ class MainWindow(QMainWindow):
         live_frame = self.latest_full_frame.copy()
 
         # Get threshold
-        threshold = float(config_data.get("template", "confidence_threshold", fallback="0.70"))
+        threshold = float(config_data.get("template", "matching_threshold", fallback="0.50"))
 
-        # Match template
+        # Match template using robust multi-start optimization
         print(f"\nAuto-calibrating with '{name}'...")
-        roi_coords, confidence = self.roi_matcher.match_template(
-            live_frame, template_data, threshold
+        roi_coords, confidence, H = self.roi_matcher.match_template_robust(
+            live_frame, template_data, threshold, num_trials=20
         )
 
         if roi_coords is None:
@@ -3064,10 +3335,10 @@ class MainWindow(QMainWindow):
         # Show template overlay for debugging (will show for 2 seconds)
         # Success message will appear after overlay
         success_message = (f"ROI detected!\n\n"
-                          f"Confidence: {confidence:.1%}\n"
+                          f"Matching ratio: {confidence:.1%}\n"
                           f"ROI: ({x1}, {y1}, {x2}, {y2})\n"
                           f"Digits: {digit_count}")
-        self.show_template_overlay(live_frame, template_data, roi_coords, confidence, success_message)
+        self.show_template_overlay(live_frame, template_data, roi_coords, confidence, H, success_message)
 
     def auto_calibrate_on_startup(self):
         """
@@ -3097,10 +3368,10 @@ class MainWindow(QMainWindow):
 
         live_frame = self.latest_full_frame.copy()
 
-        # Match
-        threshold = float(config_data.get("template", "confidence_threshold", fallback="0.70"))
-        roi_coords, confidence = self.roi_matcher.match_template(
-            live_frame, template_data, threshold
+        # Match using robust multi-start optimization
+        threshold = float(config_data.get("template", "matching_threshold", fallback="0.50"))
+        roi_coords, confidence, H = self.roi_matcher.match_template_robust(
+            live_frame, template_data, threshold, num_trials=20
         )
 
         if roi_coords is not None:
