@@ -87,7 +87,7 @@ white = QColor(255, 255, 255)
 
 # FOR DEBUGGING AND DEVELOPMENT
 import matplotlib.pyplot as plt
-WEBCAM_VIDEO = r"C:\code\TreadmillApp\videos\Video 4.wmv"
+WEBCAM_VIDEO = r"" #C:\code\TreadmillApp\videos\Video 4.wmv"
 DEBUG_SPEED_OVERRIDE = None #13
 LOAD_MODEL = True # set false for faster loading in debugging
 
